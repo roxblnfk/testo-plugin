@@ -58,7 +58,7 @@ class TestoConsoleAugmenter(private val project: Project) : ExecutionListener {
             if (props.channelsInstalled) return
             props.channelsInstalled = true
             captureHeader(props, handler)
-            TestoChannelsUi.install(console, props.channelStore, props.levelFilter, project, console)
+            TestoChannelsUi.install(console, props.channelStore, props.metadataStore, props.levelFilter, project, console)
             // The verdict is a supplier, not a value: the progress action is wired below and only reaches one at the
             // end of the run.
             TestoTestTreeDecorator.install(

@@ -37,6 +37,8 @@ class TestoConsoleProperties(
 
     val channelStore = ChannelOutputStore()
 
+    val metadataStore = com.github.xepozz.testo.tests.console.TestoMetadataStore()
+
     val levelFilter = LogLevelFilter()
 
     // What ties a tree node back to the protocol node it came from; every store below is keyed by that node's id.
@@ -97,6 +99,7 @@ class TestoConsoleProperties(
             testFrameworkName,
             consoleProperties,
             channelStore,
+            metadataStore,
             statusStore,
             runTimings,
             targetStore,

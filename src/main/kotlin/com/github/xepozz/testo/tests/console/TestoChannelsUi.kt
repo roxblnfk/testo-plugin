@@ -118,6 +118,7 @@ object TestoChannelsUi {
     fun install(
         console: SMTRunnerConsoleView,
         store: ChannelOutputStore,
+        metadataStore: TestoMetadataStore,
         levelFilter: LogLevelFilter,
         project: Project,
         parent: Disposable,
@@ -130,7 +131,7 @@ object TestoChannelsUi {
             thisLogger().warn("Testo channels disabled: TestResultsPanel.myConsole not found")
             return
         }
-        val controller = ChannelTabsController(project, store, levelFilter, console, field)
+        val controller = ChannelTabsController(project, store, metadataStore, levelFilter, console, field)
         Disposer.register(parent, controller)
         val viewer = console.resultsViewer
         viewer.addEventsListener(controller)
@@ -150,6 +151,7 @@ object TestoChannelsUi {
     private class ChannelTabsController(
         private val project: Project,
         private val store: ChannelOutputStore,
+        private val metadataStore: TestoMetadataStore,
         private val levelFilter: LogLevelFilter,
         private val console: SMTRunnerConsoleView,
         private val myConsoleField: Field,
@@ -184,6 +186,7 @@ object TestoChannelsUi {
 
         override fun onTestingStarted(viewer: TestResultsViewer) {
             store.clear()
+            metadataStore.clear()
             ensureInstalled()
         }
 
