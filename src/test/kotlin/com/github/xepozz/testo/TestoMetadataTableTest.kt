@@ -113,6 +113,30 @@ class TestoMetadataTableTest {
     }
 
     @Test
+    fun transposeSwapsAxesAndCarriesUnits() {
+        // Metric-first keys (`bench.<metric>.<variant>`): the unit dimension is the row, so the direct columns
+        // (variants) mix units and read as NUMBER — transposing makes the metric the column and restores its unit.
+        val group = groupMetadata(
+            listOf(
+                TestoMetadataEntry("bench.mean.current", TestoMetadataType.MS, "0.001"),
+                TestoMetadataEntry("bench.calls.current", TestoMetadataType.NUMBER, "20"),
+                TestoMetadataEntry("bench.mean.division", TestoMetadataType.MS, "0.002"),
+                TestoMetadataEntry("bench.calls.division", TestoMetadataType.NUMBER, "20"),
+            )
+        ).single()
+        val direct = buildMetadataMatrix(group)!!
+        assertEquals(listOf("mean", "calls"), direct.rows)
+        assertEquals(TestoMetadataType.NUMBER, direct.typeOf(MetadataColumn(null, "current")))  // mixed → NUMBER
+
+        val t = direct.transposed()
+        assertEquals(listOf("current", "division"), t.rows)
+        assertEquals(listOf(MetadataColumn(null, "mean"), MetadataColumn(null, "calls")), t.columns)
+        assertEquals("0.002", t.value("division", MetadataColumn(null, "mean")))
+        assertEquals(TestoMetadataType.MS, t.typeOf(MetadataColumn(null, "mean")))
+        assertEquals("2.00 µs", t.displayValue("division", MetadataColumn(null, "mean")))
+    }
+
+    @Test
     fun raggedMatrixFallsBackToList() {
         // rowB is missing the `place` cell — not a complete grid.
         val group = groupMetadata(

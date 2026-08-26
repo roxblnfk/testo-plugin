@@ -32,7 +32,11 @@ import com.intellij.openapi.editor.highlighter.EditorHighlighterFactory
 import com.intellij.openapi.editor.markup.HighlighterLayer
 import com.intellij.openapi.editor.markup.HighlighterTargetArea
 import com.intellij.openapi.editor.markup.TextAttributes
+import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.ActionUpdateThread
+import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.actionSystem.ToggleAction
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditor
@@ -599,39 +603,73 @@ object TestoChannelsUi {
 
         // The card body for a number matrix: the leftover scalars as a caption, the table, and a labelled button below
         // that swaps the table for a grouped bar chart of the whole matrix.
-        private fun buildMatrixCard(matrix: MetadataMatrix): JComponent {
-            val table = buildMatrixTable(matrix)
-            val center = JBPanel<Nothing>(BorderLayout()).apply { isOpaque = false; add(table, BorderLayout.CENTER) }
-            // Table (null) / Bars / Lines. Clicking the active view's button returns to the table.
-            var view: ChartMode? = null
-            fun show(target: ChartMode) {
-                view = if (view == target) null else target
+        private fun buildMatrixCard(base: MetadataMatrix): JComponent {
+            val center = JBPanel<Nothing>(BorderLayout()).apply { isOpaque = false }
+            // Table / Bars / Lines are a mutually-exclusive set of toggle actions (a segmented look, with the active one
+            // highlighted); "Swap axes" transposes the matrix — for data whose row and column dimensions arrived the
+            // other way round. Exclusivity is free: each toggle's selected state is derived from `mode`.
+            var transposed = false
+            var mode: ChartMode? = null
+            fun current() = if (transposed) base.transposed() else base
+            fun uniform() = current().columns.map { current().typeOf(it) }.distinct().size == 1
+
+            fun renderCenter() {
+                val matrix = current()
                 center.removeAll()
-                center.add(view?.let { matrixChart(matrix, it) } ?: table, BorderLayout.CENTER)
+                center.add(mode?.let { matrixChart(matrix, it) } ?: buildMatrixTable(matrix), BorderLayout.CENTER)
                 center.revalidate(); center.repaint()
             }
-            val bars = javax.swing.JButton("Bars").apply { font = JBUI.Fonts.smallFont() }
-            bars.addActionListener { show(ChartMode.BARS) }
-            // Lines share one axis, so they are only meaningful when every column carries the same unit.
-            val uniform = matrix.columns.map { matrix.typeOf(it) }.distinct().size == 1
-            val lines = javax.swing.JButton("Lines").apply { font = JBUI.Fonts.smallFont() }
-            lines.addActionListener { show(ChartMode.LINES) }
 
+            fun viewToggle(text: String, viewMode: ChartMode?) = object : ToggleAction(text) {
+                override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                override fun isSelected(e: AnActionEvent) = mode == viewMode
+                override fun setSelected(e: AnActionEvent, state: Boolean) {
+                    if (state && mode != viewMode) { mode = viewMode; renderCenter() }
+                }
+            }
+
+            val group = DefaultActionGroup().apply {
+                add(viewToggle("Table", null))
+                add(viewToggle("Bars", ChartMode.BARS))
+                add(object : ToggleAction("Lines") {
+                    override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                    override fun isSelected(e: AnActionEvent) = mode == ChartMode.LINES
+                    override fun setSelected(e: AnActionEvent, state: Boolean) {
+                        if (state && mode != ChartMode.LINES) { mode = ChartMode.LINES; renderCenter() }
+                    }
+                    // Lines share one axis, so the toggle only shows when the current orientation's columns share a unit.
+                    override fun update(e: AnActionEvent) {
+                        super.update(e)
+                        e.presentation.isEnabledAndVisible = uniform()
+                    }
+                })
+                addSeparator()
+                add(object : ToggleAction("Swap axes") {
+                    override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                    override fun isSelected(e: AnActionEvent) = transposed
+                    override fun setSelected(e: AnActionEvent, state: Boolean) {
+                        transposed = state
+                        if (mode == ChartMode.LINES && !uniform()) mode = null  // the flipped matrix may drop Lines
+                        renderCenter()
+                    }
+                })
+            }
+            val toolbar = ActionManager.getInstance().createActionToolbar("TestoMetadataChart", group, true).apply {
+                targetComponent = center
+            }
+
+            renderCenter()
             return JBPanel<Nothing>(BorderLayout()).apply {
                 isOpaque = false
-                if (matrix.scalars.isNotEmpty()) {
-                    add(JBLabel(matrix.scalars.joinToString("     ") { "${it.first} = ${it.second}" }).apply {
+                if (base.scalars.isNotEmpty()) {
+                    add(JBLabel(base.scalars.joinToString("     ") { "${it.first} = ${it.second}" }).apply {
                         font = JBUI.Fonts.smallFont()
                         foreground = JBColor.GRAY
                         border = JBUI.Borders.empty(3, 6, 2, 6)
                     }, BorderLayout.NORTH)
                 }
                 add(center, BorderLayout.CENTER)
-                add(JBPanel<Nothing>(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), JBUI.scale(4))).apply {
-                    isOpaque = false
-                    add(bars)
-                    if (uniform) add(lines)
-                }, BorderLayout.SOUTH)
+                add(toolbar.component, BorderLayout.SOUTH)
             }
         }
 
