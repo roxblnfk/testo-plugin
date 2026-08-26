@@ -56,8 +56,14 @@ data class TestoRunManifest(
     /** [com.github.xepozz.testo.tests.console.TestoTestStatus.wireName] → how many tests ended that way. */
     val statuses: Map<String, Int> = emptyMap(),
     val reports: List<StoredReport> = emptyList(),
+    /**
+     * Local files a `testMetadata` image/artifact pointed at, copied into `metadata/`: the datum's original value (the
+     * path as it was emitted) → the run-dir-relative captured copy. A replay resolves the archived copy through this,
+     * so an image survives the original file being overwritten or deleted. URLs are not captured (they stay live).
+     */
+    val metadataArtifacts: Map<String, String> = emptyMap(),
 ) {
     companion object {
-        const val VERSION = 3
+        const val VERSION = 4
     }
 }

@@ -3,6 +3,7 @@ package com.github.xepozz.testo.tests
 import com.github.xepozz.testo.TestoBundle
 import com.github.xepozz.testo.tests.console.ChannelOutputStore
 import com.github.xepozz.testo.tests.console.LogLevelFilter
+import com.github.xepozz.testo.tests.console.TestoMetadataStore
 import com.github.xepozz.testo.tests.console.TestoNodeIndex
 import com.github.xepozz.testo.tests.console.TestoOutputToGeneralEventsConverter
 import com.github.xepozz.testo.tests.console.TestoProgressAction
@@ -36,6 +37,8 @@ class TestoConsoleProperties(
     val myTestLocator = TestoTestLocator(pathMapper)
 
     val channelStore = ChannelOutputStore()
+
+    val metadataStore = TestoMetadataStore()
 
     val levelFilter = LogLevelFilter()
 
@@ -75,6 +78,11 @@ class TestoConsoleProperties(
     @Volatile
     var coverageFlagPaths: List<java.nio.file.Path> = emptyList()
 
+    // Replay only: a metadata image/artifact's original value → the archived copy's local absolute path. Empty on a
+    // live run (the files are still at their original paths); the channel UI consults this before the deployment mapper.
+    @Volatile
+    var metadataArtifactPaths: Map<String, String> = emptyMap()
+
     // getLocalPath, not getLocalFile: the report was written moments ago and the VFS may not know the file yet.
     val reportsAction = TestoReportsAction(reportStore, project) { path -> pathMapper.getLocalPath(path) }
 
@@ -97,6 +105,7 @@ class TestoConsoleProperties(
             testFrameworkName,
             consoleProperties,
             channelStore,
+            metadataStore,
             statusStore,
             runTimings,
             targetStore,

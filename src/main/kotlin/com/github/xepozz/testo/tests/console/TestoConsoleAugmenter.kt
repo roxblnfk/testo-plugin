@@ -58,7 +58,12 @@ class TestoConsoleAugmenter(private val project: Project) : ExecutionListener {
             if (props.channelsInstalled) return
             props.channelsInstalled = true
             captureHeader(props, handler)
-            TestoChannelsUi.install(console, props.channelStore, props.levelFilter, project, console)
+            TestoChannelsUi.install(
+                console, props.channelStore, props.metadataStore, props.levelFilter, project, console,
+                // A replay resolves a metadata artifact to its archived copy first; a live run finds nothing here and
+                // falls through to the deployment mapper (identity locally).
+                resolveLocalPath = { path -> props.metadataArtifactPaths[path] ?: props.pathMapper.getLocalPath(path) },
+            )
             // The verdict is a supplier, not a value: the progress action is wired below and only reaches one at the
             // end of the run.
             TestoTestTreeDecorator.install(

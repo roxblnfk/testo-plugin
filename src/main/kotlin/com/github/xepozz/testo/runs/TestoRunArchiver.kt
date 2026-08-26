@@ -4,8 +4,10 @@ import com.github.xepozz.testo.coverage.dedupeCoverageByFormat
 import com.github.xepozz.testo.coverage.perTest.TestoCoverageKeys
 import com.github.xepozz.testo.tests.TestoConsoleProperties
 import com.github.xepozz.testo.tests.console.TestoHistoryIndex
+import com.github.xepozz.testo.tests.console.TestoMetadataType
 import com.github.xepozz.testo.tests.console.TestoReportRef
 import com.github.xepozz.testo.tests.console.TestoRunTimings
+import com.github.xepozz.testo.tests.console.isMetadataUrl
 import com.github.xepozz.testo.tests.console.resolveCoverageDataFile
 import com.github.xepozz.testo.tests.console.resolveReport
 import com.github.xepozz.testo.tests.run.TestoRunConfiguration
@@ -29,6 +31,13 @@ import java.nio.file.StandardCopyOption
  */
 internal object TestoRunArchiver {
     private val LOG = Logger.getInstance(TestoRunArchiver::class.java)
+
+    private val CAPTURED_METADATA_TYPES =
+        setOf(TestoMetadataType.IMAGE, TestoMetadataType.ARTIFACT, TestoMetadataType.VIDEO)
+
+    // A metadata artifact larger than this is left where it is (the replay falls back to its original path): the archive
+    // sits under the IDE system dir and rotates, so it should not swallow a multi-hundred-MB video dump.
+    private const val MAX_CAPTURE_BYTES = 32L * 1024 * 1024
 
     fun finalizeRun(project: Project, props: TestoConsoleProperties) {
         if (props.replayMode) return
@@ -57,6 +66,7 @@ internal object TestoRunArchiver {
                     val stored = local?.let { capture(recording, ref, it, usedNames) }
                     StoredReport(ref.format, ref.name, ref.path, ref.relativePath, stored)
                 }
+                val metadataArtifacts = captureMetadataArtifacts(recording, props, mapToLocal)
                 recording.writeLocations()
                 val finishedAt = System.currentTimeMillis()
                 recording.writeManifest(
@@ -71,6 +81,7 @@ internal object TestoRunArchiver {
                         retention = recording.retention,
                         statuses = props.statusStore.counts().entries.associate { it.key.wireName to it.value },
                         reports = reports,
+                        metadataArtifacts = metadataArtifacts,
                     )
                 )
                 TestoRunStore.getInstance(project).prune()
@@ -82,6 +93,35 @@ internal object TestoRunArchiver {
                 LOG.warn("Failed to archive Testo run ${recording.dir}", e)
             }
         }
+    }
+
+    /**
+     * Copies the local files a `testMetadata` image/artifact/video pointed at into the run's `metadata/`, returning
+     * (original value → run-dir-relative copy) for the manifest. A replay resolves the archived copy through that map,
+     * so a captured image survives the source file being overwritten by the next run or deleted. URLs are left alone
+     * (a replay reopens them live), as are files that are missing or larger than [MAX_CAPTURE_BYTES].
+     */
+    private fun captureMetadataArtifacts(
+        recording: TestoRunRecording,
+        props: TestoConsoleProperties,
+        mapToLocal: (String) -> String?,
+    ): Map<String, String> {
+        val captured = LinkedHashMap<String, String>()
+        val usedNames = HashSet<String>()
+        for (entry in props.metadataStore.allEntries()) {
+            if (entry.type !in CAPTURED_METADATA_TYPES) continue
+            val value = entry.value
+            if (value.isBlank() || isMetadataUrl(value) || captured.containsKey(value)) continue
+            val local = runCatching { Path.of(mapToLocal(value) ?: value) }.getOrNull() ?: continue
+            if (!Files.isRegularFile(local) || Files.size(local) > MAX_CAPTURE_BYTES) continue
+            runCatching {
+                Files.createDirectories(recording.metadataDir)
+                val name = uniqueName(local.fileName.toString(), usedNames)
+                Files.copy(local, recording.metadataDir.resolve(name), StandardCopyOption.REPLACE_EXISTING)
+                captured[value] = "${TestoRunRecording.METADATA_DIR}/$name"
+            }.onFailure { LOG.warn("Failed to capture metadata artifact $value", it) }
+        }
+        return captured
     }
 
     /**

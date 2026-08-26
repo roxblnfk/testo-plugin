@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Test metadata (`testMetadata` service messages) shows in its own *Metadata* channel tab instead of polluting the
+  output: numeric grids become sortable unit-aware tables with bar/line/pie charts, links/images/artifacts become
+  clickable cards.
+- Metadata images and artifacts are copied into the run history, so a replay keeps them after the original files change.
+
 ## [2026.7.262] - 2026-08-18
 
 ### Added

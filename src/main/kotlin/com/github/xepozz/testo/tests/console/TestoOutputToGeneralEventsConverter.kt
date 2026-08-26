@@ -19,6 +19,7 @@ class TestoOutputToGeneralEventsConverter(
     testFrameworkName: String,
     private val consoleProperties: TestConsoleProperties,
     private val store: ChannelOutputStore,
+    private val metadataStore: TestoMetadataStore,
     private val statusStore: TestoStatusStore,
     private val timings: TestoRunTimings,
     private val targetStore: TestoTargetStore,
@@ -150,6 +151,19 @@ class TestoOutputToGeneralEventsConverter(
                 }
             }
 
+            // Standard TeamCity, but the PHP-built console does nothing with it and echoes the raw line into output.
+            // Consume it here — file the datum under its test — and never forward it.
+            TEST_METADATA -> {
+                val testName = attrs["testName"]
+                val name = attrs["name"]
+                val value = attrs["value"]
+                if (!testName.isNullOrEmpty() && !name.isNullOrEmpty() && value != null) {
+                    val entry = TestoMetadataEntry(name, TestoMetadataType.fromWire(attrs["type"]), value)
+                    metadataStore.append(store.keyFor(testName), entry)
+                }
+                return
+            }
+
             // Testo's own message, naming a report of this run. Not forwarded, for the same reason as buildProblem.
             TESTO_REPORT -> {
                 // A replay's reports come from its archive, where they were deduped and captured; the announcements
@@ -258,6 +272,7 @@ class TestoOutputToGeneralEventsConverter(
         private const val TEST_FINISHED = "testFinished"
         private const val TEST_STD_OUT = "testStdOut"
         private const val TEST_STD_ERR = "testStdErr"
+        private const val TEST_METADATA = "testMetadata"
         private const val TEST_FAILED = "testFailed"
         private const val TEST_IGNORED = "testIgnored"
         private const val BUILD_PROBLEM = "buildProblem"
