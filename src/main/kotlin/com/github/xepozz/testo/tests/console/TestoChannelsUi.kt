@@ -602,15 +602,20 @@ object TestoChannelsUi {
         private fun buildMatrixCard(matrix: MetadataMatrix): JComponent {
             val table = buildMatrixTable(matrix)
             val center = JBPanel<Nothing>(BorderLayout()).apply { isOpaque = false; add(table, BorderLayout.CENTER) }
-            var showingChart = false
-            val toggle = javax.swing.JButton("Show chart").apply { font = JBUI.Fonts.smallFont() }
-            toggle.addActionListener {
-                showingChart = !showingChart
+            // Table (null) / Bars / Lines. Clicking the active view's button returns to the table.
+            var view: ChartMode? = null
+            fun show(target: ChartMode) {
+                view = if (view == target) null else target
                 center.removeAll()
-                center.add(if (showingChart) wholeMatrixChart(matrix) else table, BorderLayout.CENTER)
-                toggle.text = if (showingChart) "Show table" else "Show chart"
+                center.add(view?.let { matrixChart(matrix, it) } ?: table, BorderLayout.CENTER)
                 center.revalidate(); center.repaint()
             }
+            val bars = javax.swing.JButton("Bars").apply { font = JBUI.Fonts.smallFont() }
+            bars.addActionListener { show(ChartMode.BARS) }
+            // Lines share one axis, so they are only meaningful when every column carries the same unit.
+            val uniform = matrix.columns.map { matrix.typeOf(it) }.distinct().size == 1
+            val lines = javax.swing.JButton("Lines").apply { font = JBUI.Fonts.smallFont() }
+            lines.addActionListener { show(ChartMode.LINES) }
 
             return JBPanel<Nothing>(BorderLayout()).apply {
                 isOpaque = false
@@ -624,7 +629,8 @@ object TestoChannelsUi {
                 add(center, BorderLayout.CENTER)
                 add(JBPanel<Nothing>(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), JBUI.scale(4))).apply {
                     isOpaque = false
-                    add(toggle)
+                    add(bars)
+                    if (uniform) add(lines)
                 }, BorderLayout.SOUTH)
             }
         }
@@ -730,9 +736,10 @@ object TestoChannelsUi {
             ))
         }
 
-        // The whole matrix as grouped bars: a category per column, a series per row. When every column shares one unit
-        // the axis converts to it; otherwise the axis is plain and hovers convert per column.
-        private fun wholeMatrixChart(matrix: MetadataMatrix): JComponent {
+        // The whole matrix as one chart: a category per column, a series per row. When every column shares one unit the
+        // axis converts to it; otherwise the axis is plain and hovers convert per column (bars only — lines need one
+        // shared unit, so that button is offered only for a uniform matrix).
+        private fun matrixChart(matrix: MetadataMatrix, mode: ChartMode): JComponent {
             val series = matrix.rows.map { row ->
                 ChartSeries(row, matrix.columns.map { matrix.value(row, it).toDoubleOrNull() ?: Double.NaN })
             }
@@ -741,9 +748,9 @@ object TestoChannelsUi {
             val uniformType = matrix.columns.map { matrix.typeOf(it) }.distinct().singleOrNull()
             val chart = if (uniformType != null) {
                 val format = chartValueFormatter(uniformType, series.flatMap { it.values })
-                TestoBarChart(title, labels, series, axisFormat = format, hoverFormat = { _, _, v -> format(v) })
+                TestoBarChart(title, labels, series, axisFormat = format, hoverFormat = { _, _, v -> format(v) }, mode = mode)
             } else {
-                TestoBarChart(title, labels, series, hoverFormat = { cat, _, v ->
+                TestoBarChart(title, labels, series, mode = mode, hoverFormat = { cat, _, v ->
                     formatMetadataDouble(v, matrix.typeOf(matrix.columns[cat]))
                 })
             }

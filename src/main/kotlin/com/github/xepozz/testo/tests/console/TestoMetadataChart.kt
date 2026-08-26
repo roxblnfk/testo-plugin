@@ -16,6 +16,9 @@ import javax.swing.ToolTipManager
 /** One named data series of a [TestoBarChart]: a value per category (NaN where the cell has no number). */
 internal class ChartSeries(val name: String, val values: List<Double>)
 
+/** Whether a [TestoBarChart] draws grouped bars or connected lines. Lines need one shared unit across all series. */
+internal enum class ChartMode { BARS, LINES }
+
 /**
  * A hand-drawn bar chart — grouped when given more than one series. Deliberately self-contained (Graphics2D over a
  * plain [JComponent]): the platform's charting APIs are either absent on 252 or `@ApiStatus.Internal`, and a metrics
@@ -31,6 +34,7 @@ internal class TestoBarChart(
     // chart still shows each bar in its own unit. Both default to a plain number.
     private val axisFormat: (Double) -> String = { formatNumber(it) },
     private val hoverFormat: (Int, Int, Double) -> String = { _, _, v -> formatNumber(v) },
+    private val mode: ChartMode = ChartMode.BARS,
 ) : JComponent() {
 
     private class Bar(val rect: Rectangle, val category: Int, val series: Int, val tip: String)
@@ -121,10 +125,22 @@ internal class TestoBarChart(
         }
 
         val slot = (plotRight - plotLeft).toDouble() / categories.size
+        if (mode == ChartMode.BARS) paintBars(g2, ::yOf, zeroY, plotLeft, slot, fm, fg)
+        else paintLines(g2, ::yOf, plotLeft, slot, fm, fg)
+
+        for (c in categories.indices) {
+            val center = (plotLeft + slot * c + slot / 2).toInt()
+            paintCategoryLabel(g2, categories[c], center, plotBottom, angled, fg, fm)
+        }
+    }
+
+    private fun paintBars(
+        g2: Graphics2D, yOf: (Double) -> Int, zeroY: Int, plotLeft: Int, slot: Double,
+        fm: java.awt.FontMetrics, fg: Color,
+    ) {
         val groupGap = slot * 0.2
         val barSlot = (slot - groupGap) / series.size
         val barWidth = (barSlot * 0.85).toInt().coerceAtLeast(2)
-
         for (c in categories.indices) {
             val slotLeft = plotLeft + slot * c + groupGap / 2
             for (s in series.indices) {
@@ -134,20 +150,57 @@ internal class TestoBarChart(
                 val y = yOf(v)
                 val top = minOf(y, zeroY)
                 val h = kotlin.math.abs(y - zeroY).coerceAtLeast(1)
-                val rect = Rectangle(x, top, barWidth, h)
                 val hovered = c == hoveredCategory && s == hoveredSeries
                 g2.color = if (hovered) seriesColor(s).brighter() else seriesColor(s)
-                g2.fillRect(rect.x, rect.y, rect.width, rect.height)
-                if (hovered) {
-                    g2.color = fg
-                    val label = axisFormat(v)
-                    g2.drawString(label, x + (barWidth - fm.stringWidth(label)) / 2, (if (v >= 0) top else top + h) - JBUI.scale(2))
-                }
-                bars += Bar(rect, c, s, "${series[s].name} · ${categories[c]}: ${hoverFormat(c, s, v)}")
+                g2.fillRect(x, top, barWidth, h)
+                if (hovered) drawValueLabel(g2, axisFormat(v), x + barWidth / 2, if (v >= 0) top else top + h, fg, fm)
+                bars += Bar(Rectangle(x, top, barWidth, h), c, s, tip(c, s, v))
             }
-            paintCategoryLabel(g2, categories[c], (slotLeft + (slot - groupGap) / 2).toInt(), plotBottom, angled, fg, fm)
         }
     }
+
+    private fun paintLines(
+        g2: Graphics2D, yOf: (Double) -> Int, plotLeft: Int, slot: Double, fm: java.awt.FontMetrics, fg: Color,
+    ) {
+        val dot = JBUI.scale(4)
+        fun centerX(c: Int) = (plotLeft + slot * c + slot / 2).toInt()
+        for (s in series.indices) {
+            g2.color = seriesColor(s)
+            g2.stroke = java.awt.BasicStroke(com.intellij.ui.scale.JBUIScale.scale(1.5f))
+            var prevX = -1
+            var prevY = 0
+            for (c in categories.indices) {
+                val v = series[s].values.getOrNull(c) ?: Double.NaN
+                if (v.isNaN()) { prevX = -1; continue }
+                val x = centerX(c)
+                val y = yOf(v)
+                if (prevX >= 0) g2.drawLine(prevX, prevY, x, y)
+                prevX = x; prevY = y
+            }
+        }
+        // Dots and hit regions on top of the lines, so a hovered point sits above every stroke.
+        for (s in series.indices) {
+            for (c in categories.indices) {
+                val v = series[s].values.getOrNull(c) ?: Double.NaN
+                if (v.isNaN()) continue
+                val x = centerX(c)
+                val y = yOf(v)
+                val hovered = c == hoveredCategory && s == hoveredSeries
+                val r = if (hovered) dot + JBUI.scale(2) else dot
+                g2.color = if (hovered) seriesColor(s).brighter() else seriesColor(s)
+                g2.fillOval(x - r, y - r, r * 2, r * 2)
+                if (hovered) drawValueLabel(g2, axisFormat(v), x, y - r, fg, fm)
+                bars += Bar(Rectangle(x - dot - JBUI.scale(3), y - dot - JBUI.scale(3), (dot + JBUI.scale(3)) * 2, (dot + JBUI.scale(3)) * 2), c, s, tip(c, s, v))
+            }
+        }
+    }
+
+    private fun drawValueLabel(g2: Graphics2D, label: String, centerX: Int, aboveY: Int, fg: Color, fm: java.awt.FontMetrics) {
+        g2.color = fg
+        g2.drawString(label, centerX - fm.stringWidth(label) / 2, aboveY - JBUI.scale(2))
+    }
+
+    private fun tip(c: Int, s: Int, v: Double): String = "${series[s].name} · ${categories[c]}: ${hoverFormat(c, s, v)}"
 
     private fun paintCategoryLabel(
         g2: Graphics2D, label: String, centerX: Int, baselineY: Int, angled: Boolean, fg: Color,
