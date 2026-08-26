@@ -714,7 +714,7 @@ object TestoChannelsUi {
             }
             val rightAligned = DefaultTableCellRenderer().apply { horizontalAlignment = SwingConstants.RIGHT }
             for (c in 1 until model.columnCount) table.columnModel.getColumn(c).cellRenderer = rightAligned
-            table.columnModel.getColumn(0).cellRenderer = MatrixRowHeaderRenderer()
+            table.columnModel.getColumn(0).cellRenderer = MatrixRowHeaderRenderer(model)
             table.tableHeader.defaultRenderer = MatrixColumnHeaderRenderer(model)
             sizeColumns(table, model)
 
@@ -770,28 +770,64 @@ object TestoChannelsUi {
             }
         }
 
-        // One column charted across the rows: a single unit, so the axis and hovers convert to it (chosen off the max).
+        // A uniform column charted across its rows (nothing to show for a mixed column — its glyph is hidden).
         private fun showColumnChart(anchor: JComponent, matrix: MetadataMatrix, viewColumn: Int) {
             val column = matrix.columns[viewColumn - 1]
+            if (!matrix.isColumnUniform(column)) return
             val values = matrix.rows.map { matrix.value(it, column).toDoubleOrNull() ?: Double.NaN }
-            val format = chartValueFormatter(matrix.typeOf(column), values)
-            openChartPopup(anchor, TestoBarChart(
-                columnLabel(column), matrix.rows, listOf(ChartSeries(column.name, values)),
-                axisFormat = format, hoverFormat = { _, _, v -> format(v) },
-            ))
+            openSeriesChartPopup(anchor, columnLabel(column), column.name, matrix.rows, values, matrix.typeOf(column))
         }
 
-        // One row charted across the columns: their units differ, so the axis stays plain and each hover shows its
-        // column's unit.
+        // A uniform row charted across its columns (nothing to show for a mixed row — its glyph is hidden).
         private fun showRowChart(anchor: JComponent, model: MatrixTableModel, viewRow: Int) {
             val row = model.rowNameAt(viewRow)
             val matrix = model.matrix
+            if (!matrix.isRowUniform(row)) return
             val values = matrix.columns.map { matrix.value(row, it).toDoubleOrNull() ?: Double.NaN }
-            openChartPopup(anchor, TestoBarChart(
-                row, matrix.columns.map(::columnLabel), listOf(ChartSeries(row, values)),
-                hoverFormat = { cat, _, v -> formatMetadataDouble(v, matrix.typeOf(matrix.columns[cat])) },
-            ))
+            openSeriesChartPopup(anchor, row, row, matrix.columns.map(::columnLabel), values, matrix.rowType(row))
         }
+
+        // A single uniform series (a row or a column) shown as bars or a pie, toggled in the popup.
+        private fun openSeriesChartPopup(
+            anchor: JComponent, title: String, seriesName: String, labels: List<String>, values: List<Double>,
+            type: TestoMetadataType,
+        ) {
+            val format = chartValueFormatter(type, values)
+            val center = JBPanel<Nothing>(BorderLayout()).apply { isOpaque = false }
+            fun render(pie: Boolean) {
+                center.removeAll()
+                center.add(
+                    if (pie) TestoPieChart(title, labels, values, format)
+                    else TestoBarChart(title, labels, listOf(ChartSeries(seriesName, values)), axisFormat = format, hoverFormat = { _, _, v -> format(v) }),
+                    BorderLayout.CENTER,
+                )
+                center.revalidate(); center.repaint()
+            }
+            var pie = false
+            val group = DefaultActionGroup().apply {
+                add(seriesToggle("Bars", { !pie }) { pie = false; render(false) })
+                add(seriesToggle("Pie", { pie }) { pie = true; render(true) })
+            }
+            group.getChildActionsOrStubs().forEach { it.templatePresentation.putClientProperty(ActionUtil.SHOW_TEXT_IN_TOOLBAR, true) }
+            val toolbar = ActionManager.getInstance().createActionToolbar("TestoMetadataSeriesChart", group, true).apply { targetComponent = center }
+            render(false)
+            val panel = JBPanel<Nothing>(BorderLayout()).apply {
+                add(center, BorderLayout.CENTER)
+                add(toolbar.component, BorderLayout.SOUTH)
+                preferredSize = Dimension(JBUI.scale(480), JBUI.scale(360))
+            }
+            JBPopupFactory.getInstance()
+                .createComponentPopupBuilder(panel, center)
+                .setResizable(true).setMovable(true).setRequestFocus(true)
+                .createPopup().showInCenterOf(anchor)
+        }
+
+        private fun seriesToggle(text: String, selected: () -> Boolean, onSelect: () -> Unit): ToggleAction =
+            object : ToggleAction(text) {
+                override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                override fun isSelected(e: AnActionEvent) = selected()
+                override fun setSelected(e: AnActionEvent, state: Boolean) { if (state) onSelect() }
+            }
 
         // The whole matrix as one chart: a category per column, a series per row. When every column shares one unit the
         // axis converts to it; otherwise the axis is plain and hovers convert per column (bars only — lines need one
@@ -839,16 +875,6 @@ object TestoChannelsUi {
                 Triple(matrix.columns.map(::columnLabel), matrix.columns.map { matrix.value(row, it).toDoubleOrNull() ?: Double.NaN }, matrix.typeOf(matrix.columns[0]))
             }
             return TestoPieChart(title, labels, values, chartValueFormatter(type, values))
-        }
-
-        private fun openChartPopup(anchor: JComponent, chart: JComponent) {
-            JBPopupFactory.getInstance()
-                .createComponentPopupBuilder(chart, chart)
-                .setResizable(true)
-                .setMovable(true)
-                .setRequestFocus(true)
-                .createPopup()
-                .showInCenterOf(anchor)
         }
 
         // Content-derived column widths (min == max, so nothing resizes and a wide table simply scrolls); the band
@@ -1645,8 +1671,8 @@ object TestoChannelsUi {
         }
 
         // Row-name cell: the bold name (WEST) with a chart glyph pinned to the right edge (EAST), so the glyph sits
-        // exactly where the click zone is tested — click it to chart the row.
-        private class MatrixRowHeaderRenderer : TableCellRenderer {
+        // exactly where the click zone is tested — click it to chart the row. The glyph shows only for a uniform row.
+        private class MatrixRowHeaderRenderer(private val model: MatrixTableModel) : TableCellRenderer {
             private val glyph = ChartGlyphIcon(JBColor.GRAY)
             override fun getTableCellRendererComponent(
                 table: javax.swing.JTable, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, column: Int,
@@ -1658,7 +1684,9 @@ object TestoChannelsUi {
                     foreground = if (isSelected) table.selectionForeground else table.foreground
                     border = JBUI.Borders.empty(1, 6, 1, 0)
                 }, BorderLayout.WEST)
-                add(JBLabel(glyph).apply { border = JBUI.Borders.empty(1, 4) }, BorderLayout.EAST)
+                if (model.matrix.isRowUniform(model.rowNameAt(row))) {
+                    add(JBLabel(glyph).apply { border = JBUI.Borders.empty(1, 4) }, BorderLayout.EAST)
+                }
             }
         }
 
@@ -1684,7 +1712,10 @@ object TestoChannelsUi {
                         foreground = header.foreground
                         border = JBUI.Borders.empty(2, 6, 2, 0)
                     }, BorderLayout.WEST)
-                    if (column >= 1) add(JBLabel(glyph).apply { border = JBUI.Borders.empty(2, 4) }, BorderLayout.EAST)
+                    // The glyph (chart this column) shows only for a uniform column — a mixed one has nothing comparable.
+                    if (column >= 1 && model.matrix.isColumnUniform(model.matrix.columns[column - 1])) {
+                        add(JBLabel(glyph).apply { border = JBUI.Borders.empty(2, 4) }, BorderLayout.EAST)
+                    }
                 }
             }
         }

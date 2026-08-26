@@ -137,6 +137,23 @@ class TestoMetadataTableTest {
     }
 
     @Test
+    fun detectsRowAndColumnUniformity() {
+        // rows current/division; columns mean(ms) and calls(number). Columns are uniform, rows are mixed.
+        val group = groupMetadata(
+            listOf(
+                TestoMetadataEntry("bench.current.mean", TestoMetadataType.MS, "0.001"),
+                TestoMetadataEntry("bench.current.calls", TestoMetadataType.NUMBER, "20"),
+                TestoMetadataEntry("bench.division.mean", TestoMetadataType.MS, "0.002"),
+                TestoMetadataEntry("bench.division.calls", TestoMetadataType.NUMBER, "20"),
+            )
+        ).single()
+        val matrix = buildMetadataMatrix(group)!!
+        assertTrue(matrix.isColumnUniform(MetadataColumn(null, "mean")))
+        assertTrue(!matrix.isRowUniform("current"))
+        assertEquals(TestoMetadataType.MS, matrix.typeOf(MetadataColumn(null, "mean")))
+    }
+
+    @Test
     fun raggedMatrixFallsBackToList() {
         // rowB is missing the `place` cell — not a complete grid.
         val group = groupMetadata(
