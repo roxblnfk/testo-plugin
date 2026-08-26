@@ -61,8 +61,9 @@ class TestoMetadataTableTest {
         assertEquals("1.50 KB", formatMetadataValue("1536", TestoMetadataType.BYTES))
         assertEquals("512 B", formatMetadataValue("512", TestoMetadataType.BYTES))
         assertEquals("0 B", formatMetadataValue("0", TestoMetadataType.BYTES))
-        // Unit-less number: trimmed.
+        // Unit-less number: trailing zeros trimmed, small values keep their significant digits.
         assertEquals("20", formatMetadataValue("20", TestoMetadataType.NUMBER))
+        assertEquals("0.0005", formatMetadataValue("0.0005", TestoMetadataType.NUMBER))
         // Unparseable / non-numeric passes through untouched.
         assertEquals("n/a", formatMetadataValue("n/a", TestoMetadataType.MS))
     }

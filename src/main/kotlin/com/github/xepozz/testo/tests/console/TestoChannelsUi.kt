@@ -581,12 +581,19 @@ object TestoChannelsUi {
             else runCatching { BrowserUtil.browse(java.io.File(local)) }
         }
 
-        // Off-EDT read (network or disk), back onto the EDT with the decoded image or null.
+        // Off-EDT read (network or disk), back onto the EDT with the decoded image or null. The URL read is bounded by
+        // timeouts — ImageIO.read(URL) has none, and a stalled host would hold the pooled thread indefinitely.
         private fun loadImage(value: String, onDone: (Image?) -> Unit) {
             ApplicationManager.getApplication().executeOnPooledThread {
                 val image = runCatching {
-                    if (isMetadataUrl(value)) ImageIO.read(java.net.URI(value).toURL())
-                    else (resolveLocalPath(value) ?: value).let { java.io.File(it).takeIf(java.io.File::isFile)?.let(ImageIO::read) }
+                    if (isMetadataUrl(value)) {
+                        val connection = java.net.URI(value).toURL().openConnection()
+                        connection.connectTimeout = 10_000
+                        connection.readTimeout = 10_000
+                        connection.getInputStream().use(ImageIO::read)
+                    } else {
+                        (resolveLocalPath(value) ?: value).let { java.io.File(it).takeIf(java.io.File::isFile)?.let(ImageIO::read) }
+                    }
                 }.getOrNull()
                 ApplicationManager.getApplication().invokeLater({ onDone(image) }, ModalityState.any())
             }
@@ -611,8 +618,13 @@ object TestoChannelsUi {
             // other way round. Exclusivity is free: each toggle's selected state is derived from `mode`.
             var transposed = false
             var mode: ChartMode? = null
-            fun current() = if (transposed) base.transposed() else base
-            fun uniform() = current().columns.map { current().typeOf(it) }.distinct().size == 1
+            // Cached: current()/uniform() run on every toolbar update tick, and transposed() rebuilds the whole matrix.
+            val transposedMatrix by lazy { base.transposed() }
+            fun current() = if (transposed) transposedMatrix else base
+            fun uniform(): Boolean {
+                val matrix = current()
+                return matrix.columns.map { matrix.typeOf(it) }.distinct().size == 1
+            }
 
             fun renderCenter() {
                 val matrix = current()
@@ -733,13 +745,16 @@ object TestoChannelsUi {
                 reinstallHeader.invoke()
             }
 
-            // A click in a header's chart-glyph zone charts that column; elsewhere in the header it sorts.
+            // A click in a header's chart-glyph zone charts that column; elsewhere in the header it sorts. A mixed
+            // column draws no glyph, so its whole header — glyph zone included — sorts.
             table.tableHeader.addMouseListener(object : java.awt.event.MouseAdapter() {
                 override fun mouseClicked(e: java.awt.event.MouseEvent) {
                     val viewColumn = table.columnAtPoint(e.point)
                     if (viewColumn < 0) return
                     val rect = table.tableHeader.getHeaderRect(viewColumn)
-                    if (viewColumn >= 1 && e.x >= rect.x + rect.width - CHART_ZONE) showColumnChart(table, matrix, viewColumn)
+                    val onGlyph = viewColumn >= 1 && e.x >= rect.x + rect.width - CHART_ZONE &&
+                            matrix.isColumnUniform(matrix.columns[viewColumn - 1])
+                    if (onGlyph) showColumnChart(table, matrix, viewColumn)
                     else model.toggleSort(viewColumn)
                 }
             })
@@ -770,10 +785,9 @@ object TestoChannelsUi {
             }
         }
 
-        // A uniform column charted across its rows (nothing to show for a mixed column — its glyph is hidden).
+        // A uniform column charted across its rows (the caller gates on uniformity, matching the hidden glyph).
         private fun showColumnChart(anchor: JComponent, matrix: MetadataMatrix, viewColumn: Int) {
             val column = matrix.columns[viewColumn - 1]
-            if (!matrix.isColumnUniform(column)) return
             val values = matrix.rows.map { matrix.value(it, column).toDoubleOrNull() ?: Double.NaN }
             openSeriesChartPopup(anchor, columnLabel(column), column.name, matrix.rows, values, matrix.typeOf(column))
         }
@@ -863,8 +877,11 @@ object TestoChannelsUi {
             column.group?.let { "$it · ${column.name}" } ?: column.name
 
         // A pie needs a single row or column of same-unit values: slice per row (single column) or per column (single row).
-        private fun pieable(matrix: MetadataMatrix): Boolean =
-            matrix.columns.size == 1 || (matrix.rows.size == 1 && matrix.columns.map { matrix.typeOf(it) }.distinct().size == 1)
+        private fun pieable(matrix: MetadataMatrix): Boolean = when {
+            matrix.columns.size == 1 -> matrix.isColumnUniform(matrix.columns[0])
+            matrix.rows.size == 1 -> matrix.isRowUniform(matrix.rows[0])
+            else -> false
+        }
 
         private fun pieChart(matrix: MetadataMatrix, title: String): JComponent {
             val (labels, values, type) = if (matrix.columns.size == 1) {

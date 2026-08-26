@@ -3,6 +3,7 @@ package com.github.xepozz.testo.tests
 import com.github.xepozz.testo.TestoBundle
 import com.github.xepozz.testo.tests.console.ChannelOutputStore
 import com.github.xepozz.testo.tests.console.LogLevelFilter
+import com.github.xepozz.testo.tests.console.TestoMetadataStore
 import com.github.xepozz.testo.tests.console.TestoNodeIndex
 import com.github.xepozz.testo.tests.console.TestoOutputToGeneralEventsConverter
 import com.github.xepozz.testo.tests.console.TestoProgressAction
@@ -37,7 +38,7 @@ class TestoConsoleProperties(
 
     val channelStore = ChannelOutputStore()
 
-    val metadataStore = com.github.xepozz.testo.tests.console.TestoMetadataStore()
+    val metadataStore = TestoMetadataStore()
 
     val levelFilter = LogLevelFilter()
 

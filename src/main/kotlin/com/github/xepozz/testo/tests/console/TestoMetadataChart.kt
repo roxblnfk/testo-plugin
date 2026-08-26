@@ -43,8 +43,8 @@ internal class TestoBarChart(
     private val series: List<ChartSeries>,
     // Axis ticks / on-bar labels: one unit for the whole chart. Hover: per (category, series) value, so a mixed-unit
     // chart still shows each bar in its own unit. Both default to a plain number.
-    private val axisFormat: (Double) -> String = { formatNumber(it) },
-    private val hoverFormat: (Int, Int, Double) -> String = { _, _, v -> formatNumber(v) },
+    private val axisFormat: (Double) -> String = { formatMetadataNumber(it) },
+    private val hoverFormat: (Int, Int, Double) -> String = { _, _, v -> formatMetadataNumber(v) },
     private val mode: ChartMode = ChartMode.BARS,
 ) : JComponent() {
 
@@ -246,22 +246,6 @@ internal class TestoBarChart(
     private fun gridColor() = JBColor.border()
 
     private fun seriesColor(index: Int): Color = chartColor(index)
-
-    companion object {
-        // Enough significant digits for small metrics (a `ms` value of 0.000101 must not collapse to "0.00"), a plain
-        // integer for round values, and always a dot — never the locale's comma, which read as truncation.
-        internal fun formatNumber(v: Double): String {
-            if (v == 0.0) return "0"
-            val abs = kotlin.math.abs(v)
-            val decimals = when {
-                abs >= 100 -> 0
-                abs >= 1 -> 2
-                else -> (-kotlin.math.floor(kotlin.math.log10(abs)).toInt() + 2).coerceIn(2, 8)
-            }
-            val text = String.format(java.util.Locale.US, "%.${decimals}f", v)
-            return if (text.contains('.')) text.trimEnd('0').trimEnd('.') else text
-        }
-    }
 }
 
 /**
@@ -366,7 +350,6 @@ internal class TestoPieChart(
             acc += fraction
         }
 
-        // Legend.
         var ly = top + fm.ascent
         val lx = width - legendWidth + pad
         val box = fm.ascent
