@@ -5,6 +5,7 @@ import com.github.xepozz.testo.tests.console.TestoMetadataEntry
 import com.github.xepozz.testo.tests.console.TestoMetadataType
 import com.github.xepozz.testo.tests.console.buildMetadataMatrix
 import com.github.xepozz.testo.tests.console.formatMetadata
+import com.github.xepozz.testo.tests.console.formatMetadataValue
 import com.github.xepozz.testo.tests.console.groupMetadata
 import com.github.xepozz.testo.tests.console.isMetadataUrl
 import org.junit.Assert.assertEquals
@@ -46,6 +47,24 @@ class TestoMetadataTableTest {
             listOf(TestoMetadataEntry("measurements.csv", TestoMetadataType.ARTIFACT, "/tmp/report.csv"))
         ).single()
         assertEquals("measurements.csv = /tmp/report.csv", formatMetadata(group))
+    }
+
+    @Test
+    fun formatsValuesWithUnits() {
+        // Smallest unit (ns / B) is a whole number; larger converted units keep two decimals.
+        assertEquals("115 ns", formatMetadataValue("0.000115", TestoMetadataType.MS))
+        assertEquals("1.50 µs", formatMetadataValue("0.0015", TestoMetadataType.MS))
+        assertEquals("1.50 ms", formatMetadataValue("1.5", TestoMetadataType.MS))
+        assertEquals("8.52%", formatMetadataValue("8.517154", TestoMetadataType.PERCENT))
+        assertEquals("0.00%", formatMetadataValue("0", TestoMetadataType.PERCENT))
+        assertEquals("1.00 MB", formatMetadataValue("1048576", TestoMetadataType.BYTES))
+        assertEquals("1.50 KB", formatMetadataValue("1536", TestoMetadataType.BYTES))
+        assertEquals("512 B", formatMetadataValue("512", TestoMetadataType.BYTES))
+        assertEquals("0 B", formatMetadataValue("0", TestoMetadataType.BYTES))
+        // Unit-less number: trimmed.
+        assertEquals("20", formatMetadataValue("20", TestoMetadataType.NUMBER))
+        // Unparseable / non-numeric passes through untouched.
+        assertEquals("n/a", formatMetadataValue("n/a", TestoMetadataType.MS))
     }
 
     @Test
@@ -123,6 +142,51 @@ class TestoMetadataTableTest {
     fun singleColumnIsNotATable() {
         val group = groupMetadata(listOf(n("t.rowA.only", "1"), n("t.rowB.only", "2"))).single()
         assertNull(buildMetadataMatrix(group))
+    }
+
+    @Test
+    fun unitNumericTypesAreTreatedAsNumbers() {
+        assertTrue(TestoMetadataType.MS.isNumeric)
+        assertTrue(TestoMetadataType.BYTES.isNumeric)
+        assertTrue(TestoMetadataType.PERCENT.isNumeric)
+        assertFalse(TestoMetadataType.TEXT.isNumeric)
+        assertEquals(TestoMetadataType.PERCENT, TestoMetadataType.fromWire("percent"))
+
+        // A `ms` grid tabulates the same as a `number` one.
+        val group = groupMetadata(
+            listOf(
+                TestoMetadataEntry("t.a.x", TestoMetadataType.MS, "1"),
+                TestoMetadataEntry("t.a.y", TestoMetadataType.MS, "2"),
+                TestoMetadataEntry("t.b.x", TestoMetadataType.MS, "3"),
+                TestoMetadataEntry("t.b.y", TestoMetadataType.MS, "4"),
+            )
+        ).single()
+        val matrix = buildMetadataMatrix(group)!!
+        assertEquals(listOf("a", "b"), matrix.rows)
+    }
+
+    @Test
+    fun mixedNumericTypesStayInOneGroup() {
+        // number + ms + percent + bytes under one prefix must pool into a single numeric group, not four cards.
+        val groups = groupMetadata(
+            listOf(
+                n("bench.current.Setup.calls", "20"),
+                TestoMetadataEntry("bench.current.Time.mean", TestoMetadataType.MS, "0.1"),
+                TestoMetadataEntry("bench.current.Time.diff", TestoMetadataType.PERCENT, "0"),
+                TestoMetadataEntry("bench.current.Summary.memory", TestoMetadataType.BYTES, "0"),
+                n("bench.division.Setup.calls", "20"),
+                TestoMetadataEntry("bench.division.Time.mean", TestoMetadataType.MS, "0.11"),
+                TestoMetadataEntry("bench.division.Time.diff", TestoMetadataType.PERCENT, "8.4"),
+                TestoMetadataEntry("bench.division.Summary.memory", TestoMetadataType.BYTES, "0"),
+            )
+        )
+        assertEquals(1, groups.size)
+        assertEquals(TestoMetadataType.NUMBER, groups[0].type)
+
+        val matrix = buildMetadataMatrix(groups[0])!!
+        assertEquals(listOf("current", "division"), matrix.rows)
+        assertTrue(matrix.hasColumnGroups)
+        assertEquals("0.11", matrix.value("division", MetadataColumn("Time", "mean")))
     }
 
     @Test

@@ -1,13 +1,17 @@
 package com.github.xepozz.testo.tests.console
 
 /**
- * The [type] TeamCity gives a `testMetadata` value. Testo emits `number|text|link|image|artifact`; `video` is in the
- * TeamCity spec and kept for completeness. Anything unrecognised is read as [TEXT] rather than dropped.
+ * The [type] TeamCity gives a `testMetadata` value. Testo emits `number|text|link|image|artifact`; the rest
+ * ([MS]/[BYTES]/[PERCENT] — numeric with a unit — and [VIDEO]) are in the TeamCity spec and kept for completeness.
+ * Anything unrecognised is read as [TEXT] rather than dropped, matching TeamCity's own default.
  *
  * @see <a href="https://www.jetbrains.com/help/teamcity/reporting-test-metadata.html">Reporting test metadata</a>
  */
-enum class TestoMetadataType(val wire: String) {
-    NUMBER("number"),
+enum class TestoMetadataType(val wire: String, val isNumeric: Boolean = false) {
+    NUMBER("number", isNumeric = true),
+    MS("ms", isNumeric = true),
+    BYTES("bytes", isNumeric = true),
+    PERCENT("percent", isNumeric = true),
     TEXT("text"),
     LINK("link"),
     IMAGE("image"),

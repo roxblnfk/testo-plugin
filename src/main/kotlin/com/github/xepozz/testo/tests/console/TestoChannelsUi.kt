@@ -46,6 +46,7 @@ import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.fileTypes.PlainTextFileType
 import com.intellij.openapi.fileTypes.UnknownFileType
 import com.intellij.openapi.diagnostic.thisLogger
+import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.vfs.LocalFileSystem
@@ -91,7 +92,7 @@ import javax.swing.Scrollable
 import javax.swing.SwingConstants
 import javax.swing.table.AbstractTableModel
 import javax.swing.table.DefaultTableCellRenderer
-import javax.swing.table.TableRowSorter
+import javax.swing.table.TableCellRenderer
 
 // The label shown for a test in aggregated channel output (the per-test header / hyperlink). Pure string logic, kept
 // top-level so it is unit-testable without the IDE platform. Handles:
@@ -120,21 +121,24 @@ internal fun testoDisplayName(locationUrl: String?, presentableName: String): St
     return if (datasetIndex.isNotEmpty()) "$fqn with data set #$datasetIndex" else "$fqn:$presentableName"
 }
 
-// A run of metadata that shares both a name prefix (everything before the first dot) and a type — the unit one metadata
-// card renders. Grouping by both keeps unlike things apart: `bench.*` numbers never share a card with, say, a screenshot
-// image or a `http.*` text blob.
+// A run of metadata that shares a name prefix (everything before the first dot) and a type *bucket* — the unit one
+// metadata card renders. [type] is the representative for the bucket: [TestoMetadataType.NUMBER] for the numeric bucket
+// (which pools number/ms/bytes/percent — all numbers, only the unit differs), else the exact non-numeric type.
 internal data class MetadataGroup(val prefix: String, val type: TestoMetadataType, val entries: List<TestoMetadataEntry>)
 
-// Splits a test's metadata into cards: one per (prefix, type), in the order each such pair first appears. Dotless names
-// share the empty prefix so a handful of loose scalars don't fragment into a card apiece. Kept top-level so it is
-// unit-testable without the IDE platform.
+// Splits a test's metadata into cards, in first-appearance order. Grouped by (prefix, bucket): all numeric types pool
+// into one bucket per prefix (so a `bench.*` table isn't torn into one card per unit), while each non-numeric type stays
+// on its own. Dotless names share the empty prefix so a handful of loose scalars don't fragment into a card apiece.
+// Kept top-level so it is unit-testable without the IDE platform.
 internal fun groupMetadata(entries: List<TestoMetadataEntry>): List<MetadataGroup> {
-    val groups = LinkedHashMap<Pair<String, TestoMetadataType>, MutableList<TestoMetadataEntry>>()
+    // The bucket key: null for the shared numeric bucket, else the exact type.
+    val groups = LinkedHashMap<Pair<String, TestoMetadataType?>, MutableList<TestoMetadataEntry>>()
     for (entry in entries) {
         val prefix = if (entry.name.contains('.')) entry.name.substringBefore('.') else ""
-        groups.getOrPut(prefix to entry.type) { mutableListOf() }.add(entry)
+        val bucket = if (entry.type.isNumeric) null else entry.type
+        groups.getOrPut(prefix to bucket) { mutableListOf() }.add(entry)
     }
-    return groups.map { (key, entries) -> MetadataGroup(key.first, key.second, entries) }
+    return groups.map { (key, entries) -> MetadataGroup(key.first, key.second ?: TestoMetadataType.NUMBER, entries) }
 }
 
 // One group's entries as a `name = value` block — the `.properties` shape, so the card is syntax-highlighted like any
@@ -464,18 +468,6 @@ object TestoChannelsUi {
                     for (group in groupMetadata(metadataStore.entriesFor(key))) {
                         val label = metadataGroupLabel(group)
                         when (group.type) {
-                            // Numbers: a full grid becomes a table, anything else the flat key/value list.
-                            TestoMetadataType.NUMBER -> {
-                                val matrix = buildMetadataMatrix(group)
-                                if (matrix != null) {
-                                    cards.addComponentCard(buildMatrixCard(matrix), label, leafLabel, onLeafClick, description)
-                                } else {
-                                    cards.add(ChannelOutputStore.Chunk(formatMetadata(group), null, label), leafLabel, onLeafClick, description)
-                                }
-                            }
-                            // Free-form text stays a highlighted key/value list.
-                            TestoMetadataType.TEXT ->
-                                cards.add(ChannelOutputStore.Chunk(formatMetadata(group), null, label), leafLabel, onLeafClick, description)
                             // Links: one card of clickable labels (each name opens its URL).
                             TestoMetadataType.LINK ->
                                 cards.addComponentCard(buildLinksCard(group), label, leafLabel, onLeafClick, description)
@@ -486,6 +478,16 @@ object TestoChannelsUi {
                             TestoMetadataType.ARTIFACT, TestoMetadataType.VIDEO ->
                                 for (entry in group.entries)
                                     cards.addComponentCard(buildArtifactCard(entry), entry.name, leafLabel, onLeafClick, description)
+                            // Numbers (incl. ms/bytes/percent): a full grid becomes a table, else the flat key/value
+                            // list; free-form text takes that same list.
+                            else -> {
+                                val matrix = if (group.type.isNumeric) buildMetadataMatrix(group) else null
+                                if (matrix != null) {
+                                    cards.addComponentCard(buildMatrixCard(matrix), label, leafLabel, onLeafClick, description)
+                                } else {
+                                    cards.add(ChannelOutputStore.Chunk(formatMetadata(group), null, label), leafLabel, onLeafClick, description)
+                                }
+                            }
                         }
                     }
                 }
@@ -595,45 +597,62 @@ object TestoChannelsUi {
             return ImageIcon(scaled)
         }
 
-        // The card body for a number matrix: the leftover scalars (if any) as a caption over the table itself.
+        // The card body for a number matrix: the leftover scalars as a caption, the table, and a labelled button below
+        // that swaps the table for a grouped bar chart of the whole matrix.
         private fun buildMatrixCard(matrix: MetadataMatrix): JComponent {
             val table = buildMatrixTable(matrix)
-            if (matrix.scalars.isEmpty()) return table
-            val caption = JBLabel(matrix.scalars.joinToString("     ") { "${it.first} = ${it.second}" }).apply {
-                font = JBUI.Fonts.smallFont()
-                foreground = JBColor.GRAY
-                border = JBUI.Borders.empty(3, 6, 2, 6)
+            val center = JBPanel<Nothing>(BorderLayout()).apply { isOpaque = false; add(table, BorderLayout.CENTER) }
+            var showingChart = false
+            val toggle = javax.swing.JButton("Show chart").apply { font = JBUI.Fonts.smallFont() }
+            toggle.addActionListener {
+                showingChart = !showingChart
+                center.removeAll()
+                center.add(if (showingChart) wholeMatrixChart(matrix) else table, BorderLayout.CENTER)
+                toggle.text = if (showingChart) "Show table" else "Show chart"
+                center.revalidate(); center.repaint()
             }
+
             return JBPanel<Nothing>(BorderLayout()).apply {
                 isOpaque = false
-                add(caption, BorderLayout.NORTH)
-                add(table, BorderLayout.CENTER)
+                if (matrix.scalars.isNotEmpty()) {
+                    add(JBLabel(matrix.scalars.joinToString("     ") { "${it.first} = ${it.second}" }).apply {
+                        font = JBUI.Fonts.smallFont()
+                        foreground = JBColor.GRAY
+                        border = JBUI.Borders.empty(3, 6, 2, 6)
+                    }, BorderLayout.NORTH)
+                }
+                add(center, BorderLayout.CENTER)
+                add(JBPanel<Nothing>(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), JBUI.scale(4))).apply {
+                    isOpaque = false
+                    add(toggle)
+                }, BorderLayout.SOUTH)
             }
         }
 
-        // The matrix as a read-only JBTable: first column the row names, the rest the columns, sortable (numeric-aware).
-        // A depth-3 matrix (columnGroup) gets a second header band above the column names, spanning each group.
+        // The matrix as a read-only JBTable: first column the row names, the rest the columns. A small chart glyph sits
+        // in each column header (right of the name) and in each row-name cell; clicking it opens a bar chart popup for
+        // that column / row. Clicking the header name sorts (numeric-aware). A depth-3 matrix gets a spanning
+        // columnGroup header band on top.
         private fun buildMatrixTable(matrix: MetadataMatrix): JComponent {
-            val columns = matrix.columns
-            val model = object : AbstractTableModel() {
-                override fun getRowCount() = matrix.rows.size
-                override fun getColumnCount() = columns.size + 1
-                override fun getColumnName(column: Int) = if (column == 0) "" else columns[column - 1].name
-                override fun isCellEditable(row: Int, column: Int) = false
-                override fun getValueAt(row: Int, column: Int): String =
-                    if (column == 0) matrix.rows[row] else matrix.value(matrix.rows[row], columns[column - 1])
-            }
-            val table = JBTable(model).apply {
+            val model = MatrixTableModel(matrix)
+            // JBTable.configureEnclosingScrollPane (fired on addNotify, and on every re-add) resets the scroll's column
+            // header to the plain table header, which would drop our columnGroup band — so re-install the band after it.
+            var reinstallHeader: (() -> Unit)? = null
+            val table = object : JBTable(model) {
+                override fun configureEnclosingScrollPane() {
+                    super.configureEnclosingScrollPane()
+                    reinstallHeader?.invoke()
+                }
+            }.apply {
                 setShowGrid(true)
                 autoResizeMode = JTable.AUTO_RESIZE_OFF
                 tableHeader.reorderingAllowed = false
                 tableHeader.resizingAllowed = false
-                rowSorter = TableRowSorter(model).apply {
-                    for (c in 0 until model.columnCount) setComparator(c, NUMERIC_AWARE)
-                }
             }
             val rightAligned = DefaultTableCellRenderer().apply { horizontalAlignment = SwingConstants.RIGHT }
             for (c in 1 until model.columnCount) table.columnModel.getColumn(c).cellRenderer = rightAligned
+            table.columnModel.getColumn(0).cellRenderer = MatrixRowHeaderRenderer()
+            table.tableHeader.defaultRenderer = MatrixColumnHeaderRenderer(model)
             sizeColumns(table, model)
 
             val scroll = JBScrollPane(table).apply {
@@ -641,7 +660,35 @@ object TestoChannelsUi {
                 verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER
                 horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED
             }
-            if (matrix.hasColumnGroups) installColumnGroupBand(table, scroll, matrix)
+            if (matrix.hasColumnGroups) {
+                val composite = groupHeaderComposite(table, matrix)
+                // super.configureEnclosingScrollPane reparents the table header out of the composite; reclaim it first.
+                reinstallHeader = {
+                    composite.add(table.tableHeader, BorderLayout.CENTER)
+                    scroll.setColumnHeaderView(composite)
+                }
+                reinstallHeader.invoke()
+            }
+
+            // A click in a header's chart-glyph zone charts that column; elsewhere in the header it sorts.
+            table.tableHeader.addMouseListener(object : java.awt.event.MouseAdapter() {
+                override fun mouseClicked(e: java.awt.event.MouseEvent) {
+                    val viewColumn = table.columnAtPoint(e.point)
+                    if (viewColumn < 0) return
+                    val rect = table.tableHeader.getHeaderRect(viewColumn)
+                    if (viewColumn >= 1 && e.x >= rect.x + rect.width - CHART_ZONE) showColumnChart(table, matrix, viewColumn)
+                    else model.toggleSort(viewColumn)
+                }
+            })
+            // A click in the row-name cell's glyph zone charts that row.
+            table.addMouseListener(object : java.awt.event.MouseAdapter() {
+                override fun mouseClicked(e: java.awt.event.MouseEvent) {
+                    val row = table.rowAtPoint(e.point)
+                    if (row < 0 || table.columnAtPoint(e.point) != 0) return
+                    val rect = table.getCellRect(row, 0, false)
+                    if (e.x >= rect.x + rect.width - CHART_ZONE) showRowChart(table, model, row)
+                }
+            })
 
             return object : JBPanel<Nothing>(BorderLayout()) {
                 init {
@@ -660,26 +707,89 @@ object TestoChannelsUi {
             }
         }
 
-        // Fixed, content-derived column widths (min == max, so nothing resizes and a wide table simply scrolls); the
-        // band paints straight off these widths, so pinning them keeps it aligned without a column-model listener.
-        private fun sizeColumns(table: JBTable, model: AbstractTableModel) {
+        // One column charted across the rows: a single unit, so the axis and hovers convert to it (chosen off the max).
+        private fun showColumnChart(anchor: JComponent, matrix: MetadataMatrix, viewColumn: Int) {
+            val column = matrix.columns[viewColumn - 1]
+            val values = matrix.rows.map { matrix.value(it, column).toDoubleOrNull() ?: Double.NaN }
+            val format = chartValueFormatter(matrix.typeOf(column), values)
+            openChartPopup(anchor, TestoBarChart(
+                columnLabel(column), matrix.rows, listOf(ChartSeries(column.name, values)),
+                axisFormat = format, hoverFormat = { _, _, v -> format(v) },
+            ))
+        }
+
+        // One row charted across the columns: their units differ, so the axis stays plain and each hover shows its
+        // column's unit.
+        private fun showRowChart(anchor: JComponent, model: MatrixTableModel, viewRow: Int) {
+            val row = model.rowNameAt(viewRow)
+            val matrix = model.matrix
+            val values = matrix.columns.map { matrix.value(row, it).toDoubleOrNull() ?: Double.NaN }
+            openChartPopup(anchor, TestoBarChart(
+                row, matrix.columns.map(::columnLabel), listOf(ChartSeries(row, values)),
+                hoverFormat = { cat, _, v -> formatMetadataDouble(v, matrix.typeOf(matrix.columns[cat])) },
+            ))
+        }
+
+        // The whole matrix as grouped bars: a category per column, a series per row. When every column shares one unit
+        // the axis converts to it; otherwise the axis is plain and hovers convert per column.
+        private fun wholeMatrixChart(matrix: MetadataMatrix): JComponent {
+            val series = matrix.rows.map { row ->
+                ChartSeries(row, matrix.columns.map { matrix.value(row, it).toDoubleOrNull() ?: Double.NaN })
+            }
+            val title = matrix.prefix.ifEmpty { "metadata" }
+            val labels = matrix.columns.map(::columnLabel)
+            val uniformType = matrix.columns.map { matrix.typeOf(it) }.distinct().singleOrNull()
+            val chart = if (uniformType != null) {
+                val format = chartValueFormatter(uniformType, series.flatMap { it.values })
+                TestoBarChart(title, labels, series, axisFormat = format, hoverFormat = { _, _, v -> format(v) })
+            } else {
+                TestoBarChart(title, labels, series, hoverFormat = { cat, _, v ->
+                    formatMetadataDouble(v, matrix.typeOf(matrix.columns[cat]))
+                })
+            }
+            return JBScrollPane(chart).apply {
+                border = JBUI.Borders.empty()
+                verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER
+                horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED
+            }
+        }
+
+        private fun columnLabel(column: MetadataColumn): String =
+            column.group?.let { "$it · ${column.name}" } ?: column.name
+
+        private fun openChartPopup(anchor: JComponent, chart: JComponent) {
+            JBPopupFactory.getInstance()
+                .createComponentPopupBuilder(chart, chart)
+                .setResizable(true)
+                .setMovable(true)
+                .setRequestFocus(true)
+                .createPopup()
+                .showInCenterOf(anchor)
+        }
+
+        // Content-derived column widths (min == max, so nothing resizes and a wide table simply scrolls); the band
+        // paints straight off these widths, so pinning them keeps it aligned without a column-model listener. Header
+        // width reserves room for the sort arrow and the chart glyph, so neither overlaps the name.
+        private fun sizeColumns(table: JBTable, model: MatrixTableModel) {
             val fm = table.getFontMetrics(table.font)
+            val headerFm = table.getFontMetrics(table.tableHeader.font)
             for (c in 0 until model.columnCount) {
-                var text = model.getColumnName(c)
-                for (r in 0 until model.rowCount) {
-                    val value = model.getValueAt(r, c).toString()
-                    if (value.length > text.length) text = value
-                }
-                val width = (fm.stringWidth(text) + JBUI.scale(18)).coerceIn(JBUI.scale(48), JBUI.scale(260))
+                var cellWidth = 0
+                for (r in 0 until model.rowCount) cellWidth = maxOf(cellWidth, fm.stringWidth(model.getValueAt(r, c)))
+                if (c == 0) cellWidth += CHART_ZONE
+                val headerReserve = JBUI.scale(16) + (if (c >= 1) CHART_ZONE else 0)
+                val headerWidth = headerFm.stringWidth(model.getColumnName(c)) + headerReserve
+                val width = (maxOf(cellWidth, headerWidth) + JBUI.scale(14)).coerceIn(JBUI.scale(56), JBUI.scale(360))
                 table.columnModel.getColumn(c).apply {
                     preferredWidth = width; minWidth = width; maxWidth = width
                 }
             }
         }
 
-        // A second header row over the column names: one cell per contiguous run of columns sharing a columnGroup,
-        // spanning their combined width. Lives in the scroll's column-header view, so it scrolls with the header.
-        private fun installColumnGroupBand(table: JBTable, scroll: JBScrollPane, matrix: MetadataMatrix) {
+        // The column-header view: a band of columnGroup cells (one per contiguous run of columns sharing a group,
+        // spanning their combined width) over the plain table header. Set as the scroll's column-header view, so it
+        // scrolls with the header. The table header is (re)parented into it by the caller's reinstall hook.
+        private fun groupHeaderComposite(table: JBTable, matrix: MetadataMatrix): JBPanel<Nothing> {
             val runs = mutableListOf<GroupRun>()
             var i = 0
             while (i < matrix.columns.size) {
@@ -691,12 +801,10 @@ object TestoChannelsUi {
                 i = j + 1
             }
             val band = GroupBand(table, runs)
-            val composite = JBPanel<Nothing>(BorderLayout()).apply {
+            return JBPanel<Nothing>(BorderLayout()).apply {
                 isOpaque = false
                 add(band, BorderLayout.NORTH)
-                add(table.tableHeader, BorderLayout.CENTER)
             }
-            scroll.setColumnHeaderView(composite)
         }
 
         private fun channelIcon(channel: String, chunks: List<ChannelOutputStore.Chunk>): Icon {
@@ -1418,6 +1526,85 @@ object TestoChannelsUi {
             }
         }
 
+        // Manual sort model: keeps a view→data row order so a header-name click can sort without a TableRowSorter, whose
+        // built-in header handler would also fire on the chart-glyph click. Numeric-aware, like the channel sort.
+        private inner class MatrixTableModel(val matrix: MetadataMatrix) : AbstractTableModel() {
+            private val order = MutableList(matrix.rows.size) { it }
+            var sortColumn = -1; private set
+            var sortAscending = true; private set
+
+            override fun getRowCount() = matrix.rows.size
+            override fun getColumnCount() = matrix.columns.size + 1
+            override fun getColumnName(column: Int) = if (column == 0) "" else matrix.columns[column - 1].name
+            override fun isCellEditable(row: Int, column: Int) = false
+            // The cell shows the unit-formatted value; sorting (below) compares the raw one, so a `ms` column orders by
+            // real duration, not by "115 ns" vs "1.5 µs" text.
+            override fun getValueAt(row: Int, column: Int): String {
+                val dataRow = order[row]
+                if (column == 0) return matrix.rows[dataRow]
+                return matrix.displayValue(matrix.rows[dataRow], matrix.columns[column - 1])
+            }
+            fun rowNameAt(viewRow: Int): String = matrix.rows[order[viewRow]]
+
+            fun toggleSort(column: Int) {
+                sortAscending = if (sortColumn == column) !sortAscending else true
+                sortColumn = column
+                val base = Comparator<Int> { a, b -> NUMERIC_AWARE.compare(rawAt(a, column), rawAt(b, column)) }
+                order.sortWith(if (sortAscending) base else base.reversed())
+                fireTableDataChanged()
+            }
+
+            private fun rawAt(dataRow: Int, column: Int): String {
+                val row = matrix.rows[dataRow]
+                return if (column == 0) row else matrix.value(row, matrix.columns[column - 1])
+            }
+        }
+
+        // Row-name cell: the bold name (WEST) with a chart glyph pinned to the right edge (EAST), so the glyph sits
+        // exactly where the click zone is tested — click it to chart the row.
+        private class MatrixRowHeaderRenderer : TableCellRenderer {
+            private val glyph = ChartGlyphIcon(JBColor.GRAY)
+            override fun getTableCellRendererComponent(
+                table: javax.swing.JTable, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, column: Int,
+            ): Component = JBPanel<Nothing>(BorderLayout()).apply {
+                isOpaque = true
+                background = if (isSelected) table.selectionBackground else table.background
+                add(JBLabel(value?.toString().orEmpty()).apply {
+                    font = table.font.deriveFont(java.awt.Font.BOLD)
+                    foreground = if (isSelected) table.selectionForeground else table.foreground
+                    border = JBUI.Borders.empty(1, 6, 1, 0)
+                }, BorderLayout.WEST)
+                add(JBLabel(glyph).apply { border = JBUI.Borders.empty(1, 4) }, BorderLayout.EAST)
+            }
+        }
+
+        // Column header: the name plus a sort arrow when this is the sort key (WEST), and — for data columns — a chart
+        // glyph pinned to the right edge (EAST) where the click zone is tested. Arrow drawn ourselves (no TableRowSorter,
+        // whose default arrow is what overlapped the cramped name).
+        private class MatrixColumnHeaderRenderer(private val model: MatrixTableModel) : TableCellRenderer {
+            private val glyph = ChartGlyphIcon(JBColor.GRAY)
+            override fun getTableCellRendererComponent(
+                table: javax.swing.JTable, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, column: Int,
+            ): Component {
+                val header = table.tableHeader
+                val arrow = when {
+                    column != model.sortColumn -> ""
+                    model.sortAscending -> "  ▲"
+                    else -> "  ▼"
+                }
+                return JBPanel<Nothing>(BorderLayout()).apply {
+                    isOpaque = true
+                    background = header.background
+                    add(JBLabel("${value?.toString().orEmpty()}$arrow").apply {
+                        font = header.font
+                        foreground = header.foreground
+                        border = JBUI.Borders.empty(2, 6, 2, 0)
+                    }, BorderLayout.WEST)
+                    if (column >= 1) add(JBLabel(glyph).apply { border = JBUI.Borders.empty(2, 4) }, BorderLayout.EAST)
+                }
+            }
+        }
+
         // Splits ANSI-coloured text into the plain string plus per-run color attributes (null for the default color).
         private fun decodeAnsi(raw: String): Pair<String, List<AnsiSegment>> {
             val plain = StringBuilder()
@@ -1549,6 +1736,9 @@ object TestoChannelsUi {
             )
             private val ICON_POOL_SIZE = BASE_ICONS.size + 1
 
+            // The clickable width at the right edge of a header cell / row-name cell: the chart glyph plus padding.
+            private val CHART_ZONE = JBUI.scale(20)
+
             // Metadata table sort: compare as numbers when both cells parse, else fall back to case-insensitive text —
             // so a `meanUs` column orders 9 before 10, while a row-name column still sorts alphabetically.
             private val NUMERIC_AWARE = Comparator<String> { a, b ->
@@ -1604,5 +1794,30 @@ object TestoChannelsUi {
 
         override fun getIconWidth(): Int = size
         override fun getIconHeight(): Int = size
+    }
+
+    // A tiny three-bar glyph for the per-column / per-row "show chart" affordance, drawn so it needs no bundled icon.
+    private class ChartGlyphIcon(private val color: Color) : Icon {
+        private val w get() = JBUI.scale(11)
+        private val h get() = JBUI.scale(10)
+
+        override fun paintIcon(c: Component?, g: Graphics, x: Int, y: Int) {
+            val g2 = g.create() as Graphics2D
+            try {
+                g2.color = color
+                val barW = JBUI.scale(2)
+                val gap = JBUI.scale(1)
+                var bx = x
+                for (bh in intArrayOf(h / 2, h, h * 2 / 3)) {
+                    g2.fillRect(bx, y + h - bh, barW, bh)
+                    bx += barW + gap
+                }
+            } finally {
+                g2.dispose()
+            }
+        }
+
+        override fun getIconWidth(): Int = w
+        override fun getIconHeight(): Int = h
     }
 }
