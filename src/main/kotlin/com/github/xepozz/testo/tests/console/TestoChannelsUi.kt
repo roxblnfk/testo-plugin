@@ -1,6 +1,7 @@
 package com.github.xepozz.testo.tests.console
 
 import com.github.xepozz.testo.TestoIcons
+import com.intellij.ide.BrowserUtil
 import com.intellij.execution.filters.CompositeFilter
 import com.intellij.execution.filters.ConsoleFilterProvider
 import com.intellij.execution.filters.Filter
@@ -35,6 +36,7 @@ import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditor
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.FileEditorProvider
 import com.intellij.openapi.fileEditor.TextEditorWithPreview
 import com.intellij.openapi.fileEditor.ex.FileEditorProviderManager
@@ -46,12 +48,14 @@ import com.intellij.openapi.fileTypes.UnknownFileType
 import com.intellij.openapi.diagnostic.thisLogger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
+import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.testFramework.LightVirtualFile
 import com.intellij.util.IconUtil
 import com.intellij.ui.HyperlinkLabel
 import com.intellij.ui.InplaceButton
 import com.intellij.ui.JBColor
+import com.intellij.ui.table.JBTable
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBLayeredPane
 import com.intellij.ui.components.JBPanel
@@ -72,13 +76,22 @@ import java.awt.datatransfer.StringSelection
 import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.Rectangle
+import java.awt.Image
 import java.awt.RenderingHints
 import java.lang.reflect.Field
+import javax.imageio.ImageIO
 import javax.swing.Icon
+import javax.swing.ImageIcon
 import javax.swing.JComponent
 import javax.swing.JLayeredPane
+import javax.swing.JTable
 import javax.swing.JViewport
+import javax.swing.ScrollPaneConstants
 import javax.swing.Scrollable
+import javax.swing.SwingConstants
+import javax.swing.table.AbstractTableModel
+import javax.swing.table.DefaultTableCellRenderer
+import javax.swing.table.TableRowSorter
 
 // The label shown for a test in aggregated channel output (the per-test header / hyperlink). Pure string logic, kept
 // top-level so it is unit-testable without the IDE platform. Handles:
@@ -107,6 +120,38 @@ internal fun testoDisplayName(locationUrl: String?, presentableName: String): St
     return if (datasetIndex.isNotEmpty()) "$fqn with data set #$datasetIndex" else "$fqn:$presentableName"
 }
 
+// A run of metadata that shares both a name prefix (everything before the first dot) and a type — the unit one metadata
+// card renders. Grouping by both keeps unlike things apart: `bench.*` numbers never share a card with, say, a screenshot
+// image or a `http.*` text blob.
+internal data class MetadataGroup(val prefix: String, val type: TestoMetadataType, val entries: List<TestoMetadataEntry>)
+
+// Splits a test's metadata into cards: one per (prefix, type), in the order each such pair first appears. Dotless names
+// share the empty prefix so a handful of loose scalars don't fragment into a card apiece. Kept top-level so it is
+// unit-testable without the IDE platform.
+internal fun groupMetadata(entries: List<TestoMetadataEntry>): List<MetadataGroup> {
+    val groups = LinkedHashMap<Pair<String, TestoMetadataType>, MutableList<TestoMetadataEntry>>()
+    for (entry in entries) {
+        val prefix = if (entry.name.contains('.')) entry.name.substringBefore('.') else ""
+        groups.getOrPut(prefix to entry.type) { mutableListOf() }.add(entry)
+    }
+    return groups.map { (key, entries) -> MetadataGroup(key.first, key.second, entries) }
+}
+
+// One group's entries as a `name = value` block — the `.properties` shape, so the card is syntax-highlighted like any
+// other channel. A genuinely shared prefix (more than one key under it) is dropped from each key, since the card header
+// already carries it; a lone `report.csv`-style name keeps its dot.
+internal fun formatMetadata(group: MetadataGroup): String {
+    val strip = group.prefix.isNotEmpty() && group.entries.size > 1
+    return group.entries.joinToString("\n") { entry ->
+        val name = if (strip) entry.name.removePrefix("${group.prefix}.") else entry.name
+        "$name = ${entry.value}"
+    }
+}
+
+/** A metadata value the plugin should open in a browser rather than the local filesystem. */
+internal fun isMetadataUrl(value: String): Boolean =
+    value.startsWith("http://", ignoreCase = true) || value.startsWith("https://", ignoreCase = true)
+
 object TestoChannelsUi {
     // The platform console lives in TestResultsPanel.myConsole with no public accessor; reach it via reflection.
     private val myConsoleField: Field? = runCatching {
@@ -122,6 +167,9 @@ object TestoChannelsUi {
         levelFilter: LogLevelFilter,
         project: Project,
         parent: Disposable,
+        // Maps a run-environment path (as a metadata image/artifact carries it) to a local one — the deployment mapper
+        // under a remote interpreter, identity locally. Defaults to identity so replays and tests need not supply it.
+        resolveLocalPath: (String) -> String? = { it },
         // Imports pass the root proxy to render the whole tree deterministically; a live run leaves this null and uses
         // whatever is selected (nothing yet at startup).
         initialSelection: SMTestProxy? = null,
@@ -131,7 +179,7 @@ object TestoChannelsUi {
             thisLogger().warn("Testo channels disabled: TestResultsPanel.myConsole not found")
             return
         }
-        val controller = ChannelTabsController(project, store, metadataStore, levelFilter, console, field)
+        val controller = ChannelTabsController(project, store, metadataStore, levelFilter, console, field, resolveLocalPath)
         Disposer.register(parent, controller)
         val viewer = console.resultsViewer
         viewer.addEventsListener(controller)
@@ -155,6 +203,7 @@ object TestoChannelsUi {
         private val levelFilter: LogLevelFilter,
         private val console: SMTRunnerConsoleView,
         private val myConsoleField: Field,
+        private val resolveLocalPath: (String) -> String?,
     ) : TestResultsViewer.EventsListener, Disposable {
 
         private var tabs: JBEditorTabs? = null
@@ -219,6 +268,9 @@ object TestoChannelsUi {
                 val outputTab =
                     addAggregateTab(tabbed, OUTPUT_TAB, AllIcons.Debugger.Console, viewer, leaves, attach = store::attachOutput)
 
+                // Metadata second, when any of these tests reported some: one card per test.
+                if (hasMetadata(leaves)) addMetadataTab(tabbed, viewer, leaves, showLeafLabels = true)
+
                 // All: syntax-highlighted cards, language picked per message from its own channel.
                 val allCards = newCards(null)
                 store.header().forEach { allCards.add(it) }
@@ -246,6 +298,8 @@ object TestoChannelsUi {
             // Output first: the raw process console, outside the channel-aggregating "All" scope.
             val outputTab = addComponentTab(tabbed, OUTPUT_TAB, AllIcons.Debugger.Console, platform)
             val key = keyOf(selected)
+            // Metadata second, when this test reported some.
+            if (hasMetadata(listOf(selected))) addMetadataTab(tabbed, viewer, listOf(selected), showLeafLabels = false)
             val header = store.header()
             // All: highlighted cards (per-message language). Header chunks first, then the live "all" stream replays
             // and keeps appending, so a streaming test's messages show up as they arrive.
@@ -388,6 +442,262 @@ object TestoChannelsUi {
             leaves.any { leaf ->
                 keyOf(leaf)?.let { store.channelsFor(it)[channel] }?.any { levelFilter.isVisible(it.level) } == true
             }
+
+        private fun hasMetadata(leaves: List<SMTestProxy>): Boolean =
+            leaves.any { keyOf(it)?.let(metadataStore::hasEntries) == true }
+
+        // The metadata channel: standard TeamCity testMetadata the converter consumed, shown as `.properties`-highlighted
+        // cards (one per test). Lazy like the other channel tabs — a big suite's cards are built only when it is opened.
+        private fun addMetadataTab(
+            tabbed: JBEditorTabs,
+            viewer: TestResultsViewer,
+            leaves: List<SMTestProxy>,
+            showLeafLabels: Boolean,
+        ) {
+            addLazyTab(tabbed, METADATA_TAB, AllIcons.General.Information) {
+                val cards = newCards(metadataFileType())
+                for (leaf in leaves) {
+                    val key = keyOf(leaf) ?: continue
+                    val leafLabel = if (showLeafLabels) fullName(leaf) else null
+                    val onLeafClick = if (showLeafLabels) ({ selectInTree(viewer, leaf) }) else null
+                    val description = if (showLeafLabels) store.description(key) else null
+                    for (group in groupMetadata(metadataStore.entriesFor(key))) {
+                        val label = metadataGroupLabel(group)
+                        when (group.type) {
+                            // Numbers: a full grid becomes a table, anything else the flat key/value list.
+                            TestoMetadataType.NUMBER -> {
+                                val matrix = buildMetadataMatrix(group)
+                                if (matrix != null) {
+                                    cards.addComponentCard(buildMatrixCard(matrix), label, leafLabel, onLeafClick, description)
+                                } else {
+                                    cards.add(ChannelOutputStore.Chunk(formatMetadata(group), null, label), leafLabel, onLeafClick, description)
+                                }
+                            }
+                            // Free-form text stays a highlighted key/value list.
+                            TestoMetadataType.TEXT ->
+                                cards.add(ChannelOutputStore.Chunk(formatMetadata(group), null, label), leafLabel, onLeafClick, description)
+                            // Links: one card of clickable labels (each name opens its URL).
+                            TestoMetadataType.LINK ->
+                                cards.addComponentCard(buildLinksCard(group), label, leafLabel, onLeafClick, description)
+                            // Images / downloadable artifacts: one card each, keyed by the datum's own (full) name.
+                            TestoMetadataType.IMAGE ->
+                                for (entry in group.entries)
+                                    cards.addComponentCard(buildImageCard(entry), entry.name, leafLabel, onLeafClick, description)
+                            TestoMetadataType.ARTIFACT, TestoMetadataType.VIDEO ->
+                                for (entry in group.entries)
+                                    cards.addComponentCard(buildArtifactCard(entry), entry.name, leafLabel, onLeafClick, description)
+                        }
+                    }
+                }
+                cards.component
+            }
+        }
+
+        // The card header's channel slot: the group prefix, with the type appended unless it is the plain-number default
+        // (so `bench` numbers read as "bench", while a screenshot reads as "shots · image").
+        private fun metadataGroupLabel(group: MetadataGroup): String? {
+            val prefix = group.prefix.ifEmpty { METADATA_TAB.lowercase() }
+            return if (group.type == TestoMetadataType.NUMBER) prefix else "$prefix · ${group.type.wire}"
+        }
+
+        // The `.properties` file type gives the metadata card real key/value highlighting; null (the type absent) falls
+        // back to a plain editor, which still reads fine.
+        private fun metadataFileType(): FileType? {
+            val fileType = FileTypeManager.getInstance().getFileTypeByExtension("properties")
+            return fileType.takeUnless { it is UnknownFileType || it is PlainTextFileType }
+        }
+
+        // Links: each datum a clickable label opening its URL in the browser.
+        private fun buildLinksCard(group: MetadataGroup): JComponent =
+            JBPanel<Nothing>(VerticalLayout(JBUI.scale(4))).apply {
+                isOpaque = false
+                border = JBUI.Borders.empty(6)
+                for (entry in group.entries) {
+                    add(HyperlinkLabel(entry.name).apply {
+                        setHyperlinkTarget(entry.value)
+                        toolTipText = entry.value
+                    })
+                }
+            }
+
+        // An image datum: its picture, loaded off the EDT (a URL or a local file), scaled to fit and click-to-open.
+        // Falls back to a clickable path/URL when the bytes can't be read (missing file, offline, unsupported format).
+        private fun buildImageCard(entry: TestoMetadataEntry): JComponent {
+            val panel = JBPanel<Nothing>(BorderLayout()).apply { isOpaque = false; border = JBUI.Borders.empty(4) }
+            panel.add(JBLabel("Loading…").apply { foreground = JBColor.GRAY; font = JBUI.Fonts.smallFont() }, BorderLayout.NORTH)
+            loadImage(entry.value) { image ->
+                panel.removeAll()
+                if (image != null) {
+                    panel.add(JBLabel(scaleIcon(image)).apply {
+                        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+                        toolTipText = entry.value
+                        addMouseListener(object : java.awt.event.MouseAdapter() {
+                            override fun mouseClicked(e: java.awt.event.MouseEvent) = openResource(entry.value)
+                        })
+                    }, BorderLayout.CENTER)
+                } else {
+                    panel.add(openableLink(entry.value), BorderLayout.CENTER)
+                }
+                panel.revalidate(); panel.repaint()
+            }
+            return panel
+        }
+
+        // A downloadable artifact (or video): a clickable path/URL plus a Copy button. Opening a local file hands it to
+        // the IDE (its own editor/viewer); a URL goes to the browser.
+        private fun buildArtifactCard(entry: TestoMetadataEntry): JComponent =
+            JBPanel<Nothing>(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), JBUI.scale(4))).apply {
+                isOpaque = false
+                border = JBUI.Borders.empty(2, 4)
+                add(openableLink(entry.value))
+                add(InplaceButton(IconButton("Copy path", AllIcons.Actions.Copy)) {
+                    CopyPasteManager.getInstance().setContents(StringSelection(entry.value))
+                }.apply { cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR) })
+            }
+
+        private fun openableLink(value: String): HyperlinkLabel =
+            HyperlinkLabel(value).apply {
+                toolTipText = value
+                addHyperlinkListener { openResource(value) }
+            }
+
+        // A URL opens in the browser; a local path (deployment-mapped when needed) opens in the IDE, falling back to the
+        // OS handler when the VFS doesn't know the file.
+        private fun openResource(value: String) {
+            if (isMetadataUrl(value)) {
+                BrowserUtil.browse(value)
+                return
+            }
+            val local = resolveLocalPath(value) ?: value
+            val file = LocalFileSystem.getInstance().refreshAndFindFileByPath(local.replace('\\', '/'))
+            if (file != null) FileEditorManager.getInstance(project).openFile(file, true)
+            else runCatching { BrowserUtil.browse(java.io.File(local)) }
+        }
+
+        // Off-EDT read (network or disk), back onto the EDT with the decoded image or null.
+        private fun loadImage(value: String, onDone: (Image?) -> Unit) {
+            ApplicationManager.getApplication().executeOnPooledThread {
+                val image = runCatching {
+                    if (isMetadataUrl(value)) ImageIO.read(java.net.URI(value).toURL())
+                    else (resolveLocalPath(value) ?: value).let { java.io.File(it).takeIf(java.io.File::isFile)?.let(ImageIO::read) }
+                }.getOrNull()
+                ApplicationManager.getApplication().invokeLater({ onDone(image) }, ModalityState.any())
+            }
+        }
+
+        // Fit within a sensible box (never upscaled), preserving aspect ratio.
+        private fun scaleIcon(image: Image): Icon {
+            val w = image.getWidth(null).coerceAtLeast(1)
+            val h = image.getHeight(null).coerceAtLeast(1)
+            val scale = minOf(JBUI.scale(480).toDouble() / w, JBUI.scale(360).toDouble() / h, 1.0)
+            if (scale >= 1.0) return ImageIcon(image)
+            val scaled = image.getScaledInstance((w * scale).toInt().coerceAtLeast(1), (h * scale).toInt().coerceAtLeast(1), Image.SCALE_SMOOTH)
+            return ImageIcon(scaled)
+        }
+
+        // The card body for a number matrix: the leftover scalars (if any) as a caption over the table itself.
+        private fun buildMatrixCard(matrix: MetadataMatrix): JComponent {
+            val table = buildMatrixTable(matrix)
+            if (matrix.scalars.isEmpty()) return table
+            val caption = JBLabel(matrix.scalars.joinToString("     ") { "${it.first} = ${it.second}" }).apply {
+                font = JBUI.Fonts.smallFont()
+                foreground = JBColor.GRAY
+                border = JBUI.Borders.empty(3, 6, 2, 6)
+            }
+            return JBPanel<Nothing>(BorderLayout()).apply {
+                isOpaque = false
+                add(caption, BorderLayout.NORTH)
+                add(table, BorderLayout.CENTER)
+            }
+        }
+
+        // The matrix as a read-only JBTable: first column the row names, the rest the columns, sortable (numeric-aware).
+        // A depth-3 matrix (columnGroup) gets a second header band above the column names, spanning each group.
+        private fun buildMatrixTable(matrix: MetadataMatrix): JComponent {
+            val columns = matrix.columns
+            val model = object : AbstractTableModel() {
+                override fun getRowCount() = matrix.rows.size
+                override fun getColumnCount() = columns.size + 1
+                override fun getColumnName(column: Int) = if (column == 0) "" else columns[column - 1].name
+                override fun isCellEditable(row: Int, column: Int) = false
+                override fun getValueAt(row: Int, column: Int): String =
+                    if (column == 0) matrix.rows[row] else matrix.value(matrix.rows[row], columns[column - 1])
+            }
+            val table = JBTable(model).apply {
+                setShowGrid(true)
+                autoResizeMode = JTable.AUTO_RESIZE_OFF
+                tableHeader.reorderingAllowed = false
+                tableHeader.resizingAllowed = false
+                rowSorter = TableRowSorter(model).apply {
+                    for (c in 0 until model.columnCount) setComparator(c, NUMERIC_AWARE)
+                }
+            }
+            val rightAligned = DefaultTableCellRenderer().apply { horizontalAlignment = SwingConstants.RIGHT }
+            for (c in 1 until model.columnCount) table.columnModel.getColumn(c).cellRenderer = rightAligned
+            sizeColumns(table, model)
+
+            val scroll = JBScrollPane(table).apply {
+                border = JBUI.Borders.empty()
+                verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER
+                horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED
+            }
+            if (matrix.hasColumnGroups) installColumnGroupBand(table, scroll, matrix)
+
+            return object : JBPanel<Nothing>(BorderLayout()) {
+                init {
+                    isOpaque = false
+                    add(scroll, BorderLayout.CENTER)
+                }
+
+                // Grow to fit every row; the outer cards scroll takes vertical overflow, the inner one takes horizontal.
+                override fun getPreferredSize(): Dimension {
+                    val headerHeight = scroll.columnHeader?.view?.preferredSize?.height
+                        ?: table.tableHeader.preferredSize.height
+                    var height = headerHeight + table.rowHeight * model.rowCount + JBUI.scale(4)
+                    scroll.horizontalScrollBar?.takeIf { it.isVisible }?.let { height += it.preferredSize.height }
+                    return Dimension(super.getPreferredSize().width, height)
+                }
+            }
+        }
+
+        // Fixed, content-derived column widths (min == max, so nothing resizes and a wide table simply scrolls); the
+        // band paints straight off these widths, so pinning them keeps it aligned without a column-model listener.
+        private fun sizeColumns(table: JBTable, model: AbstractTableModel) {
+            val fm = table.getFontMetrics(table.font)
+            for (c in 0 until model.columnCount) {
+                var text = model.getColumnName(c)
+                for (r in 0 until model.rowCount) {
+                    val value = model.getValueAt(r, c).toString()
+                    if (value.length > text.length) text = value
+                }
+                val width = (fm.stringWidth(text) + JBUI.scale(18)).coerceIn(JBUI.scale(48), JBUI.scale(260))
+                table.columnModel.getColumn(c).apply {
+                    preferredWidth = width; minWidth = width; maxWidth = width
+                }
+            }
+        }
+
+        // A second header row over the column names: one cell per contiguous run of columns sharing a columnGroup,
+        // spanning their combined width. Lives in the scroll's column-header view, so it scrolls with the header.
+        private fun installColumnGroupBand(table: JBTable, scroll: JBScrollPane, matrix: MetadataMatrix) {
+            val runs = mutableListOf<GroupRun>()
+            var i = 0
+            while (i < matrix.columns.size) {
+                val group = matrix.columns[i].group
+                var j = i
+                while (j + 1 < matrix.columns.size && matrix.columns[j + 1].group == group) j++
+                // +1 across the board: view column 0 is the row-name column, which no group covers.
+                runs += GroupRun(group, i + 1, j + 1)
+                i = j + 1
+            }
+            val band = GroupBand(table, runs)
+            val composite = JBPanel<Nothing>(BorderLayout()).apply {
+                isOpaque = false
+                add(band, BorderLayout.NORTH)
+                add(table.tableHeader, BorderLayout.CENTER)
+            }
+            scroll.setColumnHeaderView(composite)
+        }
 
         private fun channelIcon(channel: String, chunks: List<ChannelOutputStore.Chunk>): Icon {
             // A channel whose suffix maps to a real file type shows that type's file icon (query.sql -> the SQL icon).
@@ -672,6 +982,44 @@ object TestoChannelsUi {
                     list.repaint()
                 }
                 if (app.isDispatchThread) schedule(task) else app.invokeLater(task)
+            }
+
+            // A card whose body is a ready-made component (a metadata table) rather than a text editor. Shares the card
+            // chrome — numbered header, per-test link, border, sticky overlay — with the text cards, so the two kinds
+            // stack in one list. No ANSI/merge/copy path: the body owns its own interaction (the table copies cells).
+            fun addComponentCard(
+                body: JComponent,
+                channel: String?,
+                leafLabel: String?,
+                onLeafClick: (() -> Unit)?,
+                description: String?,
+            ) {
+                if (released) return
+                val task = Runnable {
+                    if (released) return@Runnable
+                    if (index >= MAX_CARDS) {
+                        if (!truncated) {
+                            truncated = true
+                            list.add(truncationNotice())
+                            list.revalidate(); list.repaint()
+                        }
+                        return@Runnable
+                    }
+                    val n = ++index
+                    val chunk = ChannelOutputStore.Chunk("", null, channel)
+                    val wrapper = JBPanel<Nothing>(BorderLayout()).apply {
+                        border = JBUI.Borders.customLine(JBColor.border(), 1)
+                        add(buildHeader(n, chunk, leafLabel, onLeafClick, description), BorderLayout.NORTH)
+                        add(body, BorderLayout.CENTER)
+                    }
+                    cardEntries += CardEntry(wrapper) { buildHeader(n, chunk, leafLabel, onLeafClick, description) }
+                    list.add(wrapper)
+                    lastMergeKey = null
+                    lastEditor = null
+                    lastCard = wrapper
+                    list.revalidate(); list.repaint()
+                }
+                if (ApplicationManager.getApplication().isDispatchThread) schedule(task) else ApplicationManager.getApplication().invokeLater(task)
             }
 
             private fun truncationNotice(): JComponent =
@@ -1028,6 +1376,48 @@ object TestoChannelsUi {
         // A rendered message card plus a factory that rebuilds its header (for the sticky overlay copy).
         private class CardEntry(val panel: JComponent, val buildHeader: () -> JComponent)
 
+        // A columnGroup's span in the table's view-column coordinates (inclusive), for the grouped header band.
+        private class GroupRun(val label: String?, val first: Int, val last: Int)
+
+        // Paints the columnGroup header row: one bordered, centered cell over each run's combined column width. Reads
+        // widths straight off the table's column model (pinned in sizeColumns), so it needs no resize listener.
+        private class GroupBand(private val table: JBTable, private val runs: List<GroupRun>) : JComponent() {
+            init {
+                isOpaque = true
+                background = table.tableHeader.background
+                font = table.tableHeader.font
+            }
+
+            override fun getPreferredSize(): Dimension =
+                Dimension(table.tableHeader.preferredSize.width, table.tableHeader.preferredSize.height)
+
+            override fun paintComponent(g: Graphics) {
+                val g2 = g.create() as Graphics2D
+                try {
+                    g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                    g2.color = background
+                    g2.fillRect(0, 0, width, height)
+                    val columnModel = table.columnModel
+                    val fm = g2.fontMetrics
+                    for (run in runs) {
+                        if (run.label.isNullOrEmpty()) continue
+                        var x = 0
+                        for (c in 0 until run.first) x += columnModel.getColumn(c).width
+                        var w = 0
+                        for (c in run.first..run.last) w += columnModel.getColumn(c).width
+                        g2.color = JBColor.border()
+                        g2.drawRect(x, 0, w - 1, height - 1)
+                        g2.color = table.tableHeader.foreground
+                        val tx = (x + (w - fm.stringWidth(run.label)) / 2).coerceAtLeast(x + JBUI.scale(2))
+                        val ty = (height + fm.ascent - fm.descent) / 2
+                        g2.drawString(run.label, tx, ty)
+                    }
+                } finally {
+                    g2.dispose()
+                }
+            }
+        }
+
         // Splits ANSI-coloured text into the plain string plus per-run color attributes (null for the default color).
         private fun decodeAnsi(raw: String): Pair<String, List<AnsiSegment>> {
             val plain = StringBuilder()
@@ -1136,6 +1526,7 @@ object TestoChannelsUi {
         companion object {
             private const val ALL_TAB = "All"
             private const val OUTPUT_TAB = "Output"
+            private const val METADATA_TAB = "Metadata"
             private const val FADE_STEP = 0.18f
 
             // Each message is a full editor; cap how many we materialize so a chatty channel can't spawn thousands.
@@ -1157,6 +1548,14 @@ object TestoChannelsUi {
                 AllIcons.General.Note,
             )
             private val ICON_POOL_SIZE = BASE_ICONS.size + 1
+
+            // Metadata table sort: compare as numbers when both cells parse, else fall back to case-insensitive text —
+            // so a `meanUs` column orders 9 before 10, while a row-name column still sorts alphabetically.
+            private val NUMERIC_AWARE = Comparator<String> { a, b ->
+                val na = a.toDoubleOrNull()
+                val nb = b.toDoubleOrNull()
+                if (na != null && nb != null) na.compareTo(nb) else a.compareTo(b, ignoreCase = true)
+            }
 
             private val HEX_COLOR = Regex("[0-9a-fA-F]{6}")
 

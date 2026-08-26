@@ -42,6 +42,10 @@ class TestoMetadataStore {
     fun entriesFor(testKey: String): List<TestoMetadataEntry> =
         synchronized(lock) { byTest[testKey]?.toList() ?: emptyList() }
 
+    /** Every datum of the run, across all tests — for the archiver, which captures the local files they point at. */
+    fun allEntries(): List<TestoMetadataEntry> =
+        synchronized(lock) { byTest.values.flatten() }
+
     fun hasEntries(testKey: String): Boolean =
         synchronized(lock) { byTest[testKey]?.isNotEmpty() == true }
 
