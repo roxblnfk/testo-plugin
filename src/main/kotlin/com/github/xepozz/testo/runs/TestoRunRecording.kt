@@ -33,6 +33,8 @@ class TestoRunRecording internal constructor(
 
     val reportsDir: Path get() = dir.resolve(REPORTS_DIR)
 
+    val metadataDir: Path get() = dir.resolve(METADATA_DIR)
+
     fun appendChunk(stream: Int, text: String) {
         synchronized(lock) {
             if (closed) return
@@ -83,6 +85,7 @@ class TestoRunRecording internal constructor(
         const val MANIFEST_FILE = "run.json"
         const val TESTS_FILE = "tests.txt"
         const val REPORTS_DIR = "reports"
+        const val METADATA_DIR = "metadata"
 
         // A suite of a few thousand tests writes a few thousand short lines; the cap only stops a pathological run
         // (a data provider yielding tens of thousands of sets) from holding the whole list in memory.

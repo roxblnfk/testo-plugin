@@ -88,6 +88,7 @@ internal class TestoRunReplayProfile(
                 ?: TestoRunTimings.Marks(startedAt = manifest.startedAt, finishedAt = manifest.finishedAt)
             if (!marks.isEmpty) props.runTimings.restore(marks)
             seedReports(props)
+            seedMetadataArtifacts(props)
             // The command line is not part of the recorded stream (the live run puts it on the channel store, not the
             // process output), so the header is reprinted from the manifest — with the original run's clock.
             manifest.commandLine.takeIf { it.isNotBlank() }?.let { commandLine ->
@@ -141,6 +142,17 @@ internal class TestoRunReplayProfile(
                     schemaVersion = null,
                 )
             )
+        }
+    }
+
+    /**
+     * Points the channel UI at the archived copies of this run's metadata images/artifacts: the recorded log carries
+     * their original paths, which a later run may have overwritten, so the resolver maps each back to `metadata/`.
+     */
+    private fun seedMetadataArtifacts(props: TestoConsoleProperties) {
+        if (manifest.metadataArtifacts.isEmpty()) return
+        props.metadataArtifactPaths = manifest.metadataArtifacts.mapValues { (_, stored) ->
+            runDir.resolve(stored).toAbsolutePath().toString()
         }
     }
 
