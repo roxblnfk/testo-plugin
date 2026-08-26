@@ -65,6 +65,8 @@ internal class MetadataMatrix(
     }
 
     companion object {
+        // NUL because segments may contain spaces, so any printable separator could collide; as the escape, never the
+        // raw byte — that turns the source file binary to git.
         internal fun cellKey(row: String, column: MetadataColumn): String =
             "$row\u0000${column.group ?: ""}\u0000${column.name}"
     }

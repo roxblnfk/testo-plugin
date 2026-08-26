@@ -514,7 +514,6 @@ object TestoChannelsUi {
             return fileType.takeUnless { it is UnknownFileType || it is PlainTextFileType }
         }
 
-        // Links: each datum a clickable label opening its URL in the browser.
         private fun buildLinksCard(group: MetadataGroup): JComponent =
             JBPanel<Nothing>(VerticalLayout(JBUI.scale(4))).apply {
                 isOpaque = false
@@ -527,8 +526,7 @@ object TestoChannelsUi {
                 }
             }
 
-        // An image datum: its picture, loaded off the EDT (a URL or a local file), scaled to fit and click-to-open.
-        // Falls back to a clickable path/URL when the bytes can't be read (missing file, offline, unsupported format).
+        // The image, loaded off the EDT, scaled to fit, click-to-open; a clickable path/URL when the bytes can't be read.
         private fun buildImageCard(entry: TestoMetadataEntry): JComponent {
             val panel = JBPanel<Nothing>(BorderLayout()).apply { isOpaque = false; border = JBUI.Borders.empty(4) }
             panel.add(JBLabel("Loading…").apply { foreground = JBColor.GRAY; font = JBUI.Fonts.smallFont() }, BorderLayout.NORTH)
@@ -609,13 +607,11 @@ object TestoChannelsUi {
             return ImageIcon(scaled)
         }
 
-        // The card body for a number matrix: the leftover scalars as a caption, the table, and a labelled button below
-        // that swaps the table for a grouped bar chart of the whole matrix.
+        // The card body for a number matrix: the leftover scalars as a caption, the table, and a row of view toggles
+        // below (Table / Bars / Lines / Pie + Swap axes). The views are mutually exclusive without a ButtonGroup: each
+        // toggle's selected state is derived from `mode`.
         private fun buildMatrixCard(base: MetadataMatrix): JComponent {
             val center = JBPanel<Nothing>(BorderLayout()).apply { isOpaque = false }
-            // Table / Bars / Lines are a mutually-exclusive set of toggle actions (a segmented look, with the active one
-            // highlighted); "Swap axes" transposes the matrix — for data whose row and column dimensions arrived the
-            // other way round. Exclusivity is free: each toggle's selected state is derived from `mode`.
             var transposed = false
             var mode: ChartMode? = null
             // Cached: current()/uniform() run on every toolbar update tick, and transposed() rebuilds the whole matrix.
@@ -704,10 +700,8 @@ object TestoChannelsUi {
             }
         }
 
-        // The matrix as a read-only JBTable: first column the row names, the rest the columns. A small chart glyph sits
-        // in each column header (right of the name) and in each row-name cell; clicking it opens a bar chart popup for
-        // that column / row. Clicking the header name sorts (numeric-aware). A depth-3 matrix gets a spanning
-        // columnGroup header band on top.
+        // The matrix as a read-only JBTable: row names in the first column, a chart glyph in each uniform column header
+        // and row-name cell, numeric-aware sort on a header-name click, and a spanning columnGroup band for depth-3.
         private fun buildMatrixTable(matrix: MetadataMatrix): JComponent {
             val model = MatrixTableModel(matrix)
             // JBTable.configureEnclosingScrollPane (fired on addNotify, and on every re-add) resets the scroll's column
@@ -1708,8 +1702,8 @@ object TestoChannelsUi {
         }
 
         // Column header: the name plus a sort arrow when this is the sort key (WEST), and — for data columns — a chart
-        // glyph pinned to the right edge (EAST) where the click zone is tested. Arrow drawn ourselves (no TableRowSorter,
-        // whose default arrow is what overlapped the cramped name).
+        // glyph pinned to the right edge (EAST) where the click zone is tested. The arrow is drawn ourselves: no
+        // TableRowSorter, whose default arrow overlaps a cramped name.
         private class MatrixColumnHeaderRenderer(private val model: MatrixTableModel) : TableCellRenderer {
             private val glyph = ChartGlyphIcon(JBColor.GRAY)
             override fun getTableCellRendererComponent(

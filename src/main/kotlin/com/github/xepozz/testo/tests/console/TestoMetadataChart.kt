@@ -33,9 +33,7 @@ internal fun chartColor(index: Int): Color = CHART_PALETTE[((index % CHART_PALET
 /**
  * A hand-drawn bar chart — grouped when given more than one series. Deliberately self-contained (Graphics2D over a
  * plain [JComponent]): the platform's charting APIs are either absent on 252 or `@ApiStatus.Internal`, and a metrics
- * bar chart needs nothing they add. Handles negative values (a zero baseline inside the range) and a legend for the
- * grouped case; long or numerous category labels are drawn at an angle so they don't overlap. Hovering a bar highlights
- * it, prints its value above it, and shows a tooltip.
+ * bar chart needs nothing they add.
  */
 internal class TestoBarChart(
     private val title: String,
@@ -106,7 +104,6 @@ internal class TestoBarChart(
         val legendHeight = if (series.size > 1) fm.height + JBUI.scale(4) else 0
         if (series.size > 1) paintLegend(g2, pad, titleBottom, fg)
 
-        // Reserve room at the bottom for angled category labels and at the left for value ticks.
         val angled = categories.size > 6 || categories.any { fm.stringWidth(it) > JBUI.scale(40) }
         val labelBand = if (angled) JBUI.scale(48) else fm.height + JBUI.scale(4)
         val axisWidth = JBUI.scale(52)
@@ -249,9 +246,8 @@ internal class TestoBarChart(
 }
 
 /**
- * A hand-drawn pie of one dimension of same-unit values (a table reduced to a single row or column). Slices are
- * proportional to the absolute value; the legend lists each label with its formatted value and share. Hovering a slice
- * brightens it and shows a tooltip. Negative values are charted by magnitude.
+ * A hand-drawn pie of one dimension of same-unit values (a table reduced to a single row or column). Negative values
+ * are charted by magnitude.
  */
 internal class TestoPieChart(
     private val title: String,
@@ -331,7 +327,6 @@ internal class TestoPieChart(
             return
         }
 
-        // Pie on the left, legend on the right.
         val legendWidth = (labels.maxOfOrNull { fm.stringWidth(it) } ?: 0) + JBUI.scale(120)
         val pieArea = width - pad - legendWidth
         radius = (minOf(pieArea - pad * 2, height - top - pad * 2) / 2).coerceAtLeast(JBUI.scale(20))
