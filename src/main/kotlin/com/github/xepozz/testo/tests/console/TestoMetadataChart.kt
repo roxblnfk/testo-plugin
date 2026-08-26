@@ -174,7 +174,7 @@ internal class TestoBarChart(
         fun centerX(c: Int) = (plotLeft + slot * c + slot / 2).toInt()
         for (s in series.indices) {
             g2.color = seriesColor(s)
-            g2.stroke = java.awt.BasicStroke(com.intellij.ui.scale.JBUIScale.scale(1.5f))
+            g2.stroke = java.awt.BasicStroke(JBUI.scale(1.5f))
             var prevX = -1
             var prevY = 0
             for (c in categories.indices) {

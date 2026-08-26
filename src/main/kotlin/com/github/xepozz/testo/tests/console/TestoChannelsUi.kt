@@ -502,7 +502,7 @@ object TestoChannelsUi {
 
         // The card header's channel slot: the group prefix, with the type appended unless it is the plain-number default
         // (so `bench` numbers read as "bench", while a screenshot reads as "shots · image").
-        private fun metadataGroupLabel(group: MetadataGroup): String? {
+        private fun metadataGroupLabel(group: MetadataGroup): String {
             val prefix = group.prefix.ifEmpty { METADATA_TAB.lowercase() }
             return if (group.type == TestoMetadataType.NUMBER) prefix else "$prefix · ${group.type.wire}"
         }
@@ -665,7 +665,7 @@ object TestoChannelsUi {
                     }
                 })
                 addSeparator()
-                add(object : ToggleAction("Swap axes") {
+                add(object : ToggleAction("Swap Axes") {
                     override fun getActionUpdateThread() = ActionUpdateThread.EDT
                     override fun isSelected(e: AnActionEvent) = transposed
                     override fun setSelected(e: AnActionEvent, state: Boolean) {

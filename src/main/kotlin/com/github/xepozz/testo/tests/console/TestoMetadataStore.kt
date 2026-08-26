@@ -1,7 +1,7 @@
 package com.github.xepozz.testo.tests.console
 
 /**
- * The [type] TeamCity gives a `testMetadata` value. Testo emits `number|text|link|image|artifact`; the rest
+ * The `type` TeamCity gives a `testMetadata` value. Testo emits `number|text|link|image|artifact`; the rest
  * ([MS]/[BYTES]/[PERCENT] — numeric with a unit — and [VIDEO]) are in the TeamCity spec and kept for completeness.
  * Anything unrecognised is read as [TEXT] rather than dropped, matching TeamCity's own default.
  *

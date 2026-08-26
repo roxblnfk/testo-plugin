@@ -4,7 +4,7 @@ package com.github.xepozz.testo.tests.console
 internal data class MetadataColumn(val group: String?, val name: String)
 
 /**
- * A test's `number` metadata reshaped into a table, from keys of the form `<prefix>.<row>.[columnGroup].<column>`:
+ * A test's `number` metadata reshaped into a table, from keys of the form `<prefix>.<row>.<columnGroup?>.<column>`:
  *
  * - `prefix.row.column`       → a plain matrix (rows × columns);
  * - `prefix.row.group.column` → the same, with columns gathered under a spanning `columnGroup` header.
