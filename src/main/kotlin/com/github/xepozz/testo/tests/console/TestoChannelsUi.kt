@@ -37,6 +37,7 @@ import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.actionSystem.ToggleAction
+import com.intellij.openapi.actionSystem.ex.ActionUtil
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditor
@@ -643,16 +644,34 @@ object TestoChannelsUi {
                         e.presentation.isEnabledAndVisible = uniform()
                     }
                 })
+                add(object : ToggleAction("Pie") {
+                    override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                    override fun isSelected(e: AnActionEvent) = mode == ChartMode.PIE
+                    override fun setSelected(e: AnActionEvent, state: Boolean) {
+                        if (state && mode != ChartMode.PIE) { mode = ChartMode.PIE; renderCenter() }
+                    }
+                    // A pie needs a single row or column of one unit.
+                    override fun update(e: AnActionEvent) {
+                        super.update(e)
+                        e.presentation.isEnabledAndVisible = pieable(current())
+                    }
+                })
                 addSeparator()
                 add(object : ToggleAction("Swap axes") {
                     override fun getActionUpdateThread() = ActionUpdateThread.EDT
                     override fun isSelected(e: AnActionEvent) = transposed
                     override fun setSelected(e: AnActionEvent, state: Boolean) {
                         transposed = state
-                        if (mode == ChartMode.LINES && !uniform()) mode = null  // the flipped matrix may drop Lines
+                        // The flipped matrix may no longer offer the active chart.
+                        if (mode == ChartMode.LINES && !uniform()) mode = null
+                        if (mode == ChartMode.PIE && !pieable(current())) mode = null
                         renderCenter()
                     }
                 })
+            }
+            // These actions carry no icon; without this the toolbar draws an empty icon button instead of the label.
+            group.getChildActionsOrStubs().forEach {
+                it.templatePresentation.putClientProperty(ActionUtil.SHOW_TEXT_IN_TOOLBAR, true)
             }
             val toolbar = ActionManager.getInstance().createActionToolbar("TestoMetadataChart", group, true).apply {
                 targetComponent = center
@@ -778,10 +797,15 @@ object TestoChannelsUi {
         // axis converts to it; otherwise the axis is plain and hovers convert per column (bars only — lines need one
         // shared unit, so that button is offered only for a uniform matrix).
         private fun matrixChart(matrix: MetadataMatrix, mode: ChartMode): JComponent {
+            val title = matrix.prefix.ifEmpty { "metadata" }
+            if (mode == ChartMode.PIE) return JBScrollPane(pieChart(matrix, title)).apply {
+                border = JBUI.Borders.empty()
+                verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER
+                horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED
+            }
             val series = matrix.rows.map { row ->
                 ChartSeries(row, matrix.columns.map { matrix.value(row, it).toDoubleOrNull() ?: Double.NaN })
             }
-            val title = matrix.prefix.ifEmpty { "metadata" }
             val labels = matrix.columns.map(::columnLabel)
             val uniformType = matrix.columns.map { matrix.typeOf(it) }.distinct().singleOrNull()
             val chart = if (uniformType != null) {
@@ -801,6 +825,21 @@ object TestoChannelsUi {
 
         private fun columnLabel(column: MetadataColumn): String =
             column.group?.let { "$it · ${column.name}" } ?: column.name
+
+        // A pie needs a single row or column of same-unit values: slice per row (single column) or per column (single row).
+        private fun pieable(matrix: MetadataMatrix): Boolean =
+            matrix.columns.size == 1 || (matrix.rows.size == 1 && matrix.columns.map { matrix.typeOf(it) }.distinct().size == 1)
+
+        private fun pieChart(matrix: MetadataMatrix, title: String): JComponent {
+            val (labels, values, type) = if (matrix.columns.size == 1) {
+                val column = matrix.columns[0]
+                Triple(matrix.rows, matrix.rows.map { matrix.value(it, column).toDoubleOrNull() ?: Double.NaN }, matrix.typeOf(column))
+            } else {
+                val row = matrix.rows[0]
+                Triple(matrix.columns.map(::columnLabel), matrix.columns.map { matrix.value(row, it).toDoubleOrNull() ?: Double.NaN }, matrix.typeOf(matrix.columns[0]))
+            }
+            return TestoPieChart(title, labels, values, chartValueFormatter(type, values))
+        }
 
         private fun openChartPopup(anchor: JComponent, chart: JComponent) {
             JBPopupFactory.getInstance()

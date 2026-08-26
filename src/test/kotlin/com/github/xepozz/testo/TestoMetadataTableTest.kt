@@ -163,8 +163,17 @@ class TestoMetadataTableTest {
     }
 
     @Test
-    fun singleColumnIsNotATable() {
+    fun singleColumnBuildsOneDimensionalMatrix() {
+        // A single column across ≥2 rows is a valid 1×N strip (a table, and a pie/bar candidate).
         val group = groupMetadata(listOf(n("t.rowA.only", "1"), n("t.rowB.only", "2"))).single()
+        val matrix = buildMetadataMatrix(group)!!
+        assertEquals(listOf("rowA", "rowB"), matrix.rows)
+        assertEquals(listOf(MetadataColumn(null, "only")), matrix.columns)
+    }
+
+    @Test
+    fun singleCellIsNotATable() {
+        val group = groupMetadata(listOf(n("t.rowA.only", "1"))).single()
         assertNull(buildMetadataMatrix(group))
     }
 
